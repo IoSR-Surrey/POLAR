@@ -7,30 +7,55 @@ pytest.importorskip("torch.utils.tensorboard")
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from scripts.train.train import ListenerBasedLoss, Train
+
+from scripts.datasets.listener_dataset import get_listener_loader
+from scripts.datasets.stimulus_dataset import get_stim_loader
 from scripts.optimisation.custom_modules import MultiSourceFIR
+from scripts.train.train import ListenerBasedLoss, Train
+
 
 class IdentityPropagation(nn.Module):
-    def forward(self, spk_filters: torch.Tensor) -> torch.Tensor:
-        # This stand-in propagation module returns the filters unchanged so the integration test can
-        # exercise the Train class without needing SOFA files, stimuli, or external acoustics data.
-        return spk_filters
+    def forward(self, stimulus, spk_filters, listener_indices=None) -> torch.Tensor:
+        n_listeners = 1 if listener_indices is None else len(listener_indices)
+        left = spk_filters[:, 0, :]
+        right = spk_filters[:, 1, :]
+        bin_stim = torch.stack([left, right], dim=1).unsqueeze(1)
+        return bin_stim.expand(-1, n_listeners, -1, -1)
 
 
 class DifferenceModel(nn.Module):
     def __init__(self, target: float) -> None:
         super().__init__()
-        self.target = target
+        self.target = torch.tensor([target], dtype=torch.float32)
         self.loss = F.mse_loss
         self.loss_norm = 1.0
-        self.lstn_pos_conf = None
+        self.ref_flag = 0
 
     def forward(self, bin_stim: torch.Tensor) -> torch.Tensor:
-        # The "perceptual" estimate here is simply mean(left) - mean(right), chosen because it is
-        # differentiable and easy to interpret by hand.
+        if bin_stim.ndim == 4:
+            bin_stim = bin_stim[:, 0]
         left = bin_stim[:, 0:1, :].mean(dim=-1)
         right = bin_stim[:, 1:2, :].mean(dim=-1)
-        return left - right
+        return (left - right).view(bin_stim.shape[0], 1)
+
+
+LOSS_KEY = "difference"
+
+
+def _estimate_localisation(trainer: Train) -> float:
+    unit_input = torch.ones(1, 1, device=trainer.device, dtype=trainer.dtype)
+    with torch.no_grad():
+        spk_filters = trainer.nn(unit_input)
+        listener_idx = torch.arange(len(trainer.lstn_loader.dataset), device=trainer.device)
+        stimulus = next(iter(trainer.stim_loader)).to(device=trainer.device, dtype=trainer.dtype)
+        bin_stim = trainer.prop(stimulus, spk_filters, listener_idx)
+        _, estimation = trainer.loss_dict[LOSS_KEY].compute_loss(
+            bin_stim=bin_stim,
+            spk_filters=spk_filters,
+            stim=stimulus,
+            listener_indices=listener_idx,
+        )
+    return float(estimation.mean())
 
 
 def test_train_moves_estimate_towards_target() -> None:
@@ -52,13 +77,26 @@ def test_train_moves_estimate_towards_target() -> None:
     optimiser = torch.optim.Adam(nn_model.parameters(), lr=0.05)
 
     localisation_model = DifferenceModel(target=1.0)
+    stim_loader, _ = get_stim_loader(
+        fs=48_000,
+        batch_size=1,
+        n_stimulus=1,
+        stimulus_type="impulse",
+        device="cpu",
+        dtype=torch.float32,
+        shuffle=False,
+    )
+    lstn_pos = torch.tensor([[0.0, 0.0]], dtype=torch.float32)
+    lstn_loader, _ = get_listener_loader(lstn_pos, batch_size=1, symmetric=False)
 
     trainer = Train(
         n_epoch=80,
+        stim_loader=stim_loader,
+        lstn_loader=lstn_loader,
         nn=nn_model,
         prop=IdentityPropagation(),
         loss_dict={
-            "localisation": ListenerBasedLoss(
+            LOSS_KEY: ListenerBasedLoss(
                 model=localisation_model,
                 weight=1.0,
                 device=torch.device("cpu"),
@@ -70,20 +108,9 @@ def test_train_moves_estimate_towards_target() -> None:
         scheduler=None,
     )
 
-    _, initial_estimates, _initial_bin_stim = trainer.evaluate()
+    initial_error = abs(_estimate_localisation(trainer) - 1.0)
     trainer.train()
-    _, final_estimates, _final_bin_stim = trainer.evaluate()
+    final_error = abs(_estimate_localisation(trainer) - 1.0)
 
-    initial_error = abs(float(initial_estimates["localisation"]) - 1.0)
-    final_error = abs(float(final_estimates["localisation"]) - 1.0)
-
-    # Because the initial filters are all zero and the model computes mean(left) - mean(right),
-    # the initial estimate is 0, so the initial error relative to target 1.0 is exactly 1.0.
-    # We do not hard-code that number here; instead we check the more important behavioural claim:
-    # training should reduce the error.
     assert initial_error > final_error
-
-    # With this simple objective and 80 Adam steps at lr=0.05, the final estimate should end up
-    # close to the target. The tolerance of 0.15 is chosen as a robust behavioural bound rather
-    # than an exact value, since optimisation trajectories can vary slightly across environments.
     assert 0.15 > final_error
