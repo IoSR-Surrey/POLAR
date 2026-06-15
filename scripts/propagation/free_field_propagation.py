@@ -20,9 +20,9 @@ class SingleSourceBinauralFreeFieldPropagation(nn.Module):
         self.dtype = dtype
         self.apply_distance_attenuation = apply_distance_attenuation
 
-        self.lstn_pos = torch.tensor(lstn_pos, device=self.device, dtype=self.dtype)
+        self.lstn_pos = lstn_pos
         self.n_listeners = len(self.lstn_pos)
-        self.source_pos = torch.tensor(source_pos, device=self.device, dtype=self.dtype)
+        self.source_pos = source_pos
         self.sofa_file_path = sofa_file_path
         self.sofaile = sf.read_sofa(sofa_file_path)
 
@@ -88,9 +88,9 @@ class BinauralFreeFieldPropagation(nn.Module):
         self.device = device
         self.apply_distance_attenuation = apply_distance_attenuation
 
-        self.lstn_pos = torch.tensor(lstn_pos, device=self.device, dtype=self.dtype)
+        self.lstn_pos = lstn_pos
         self.n_listeners = len(self.lstn_pos)
-        self.spk_pos = torch.tensor(spk_pos, device=self.device, dtype=self.dtype)
+        self.spk_pos = spk_pos
         if self.spk_pos.ndim != 2 or self.spk_pos.shape[1] != 2:
             raise ValueError("spk_pos must have shape (n_sources, 2)")
 

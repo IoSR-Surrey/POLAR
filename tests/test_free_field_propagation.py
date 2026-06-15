@@ -116,9 +116,9 @@ def test_binaural_free_field_propagation_optionally_applies_inverse_distance_gai
 
     stim = torch.tensor([[[1.0]]], dtype=torch.float64)
     spk_filters = torch.tensor([[[1.0]]], dtype=torch.float64)
-    lstn_pos = [[0.0, 0.0], [1.0, 0.0]]
-    lstn_idx = [0, 1]  
-    spk_pos = [[2.0, 0.0]]
+    lstn_pos = torch.tensor([[0.0, 0.0], [1.0, 0.0]], dtype=torch.float64)
+    lstn_idx = torch.tensor([0, 1], dtype=torch.long)
+    spk_pos = torch.tensor([[2.0, 0.0]], dtype=torch.float64)
 
     propagation_without_attenuation = free_field_propagation.BinauralFreeFieldPropagation(
         fs=48000,
