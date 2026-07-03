@@ -17,6 +17,7 @@ from models.train import ModelTrainer, create_model_dict
 class _MockListenerModel(nn.Module):
     def __init__(self, scale: float = 1.0) -> None:
         super().__init__()
+        self.model_type = "listener_based"
         self.scale = scale
 
     def forward(self, binaural_signals: torch.Tensor) -> dict:
@@ -51,22 +52,24 @@ def test_create_model_dict_assigns_unique_class_names() -> None:
 
 def test_model_trainer_compute_estimates() -> None:
     trainer = ModelTrainer([_MockListenerModel(3.0)])
-    binaural = torch.ones(2, 2, 8)
+    binaural = torch.ones(2, 1, 2, 8)
+    spk_filters = torch.ones(1, 2, 32)
 
-    trainer.compute_estimates(binaural)
+    trainer.compute_estimates(binaural, spk_filters, listener_idx=0)
 
-    assert trainer.estimates["_MockListenerModel"].shape == (2,)
-    assert trainer.estimates["_MockListenerModel"][0].item() == pytest.approx(3.0)
+    assert trainer.estimates["_MockListenerModel"].shape == (2, 1)
+    assert trainer.estimates["_MockListenerModel"][0, 0].item() == pytest.approx(3.0)
     assert trainer.kwargs_output["_MockListenerModel"]["tag"] == "_MockListenerModel"
 
 
 def test_model_trainer_compute_loss_applies_weights() -> None:
     trainer = ModelTrainer([_MockListenerModel(2.0)], weights=[2.0])
-    binaural = torch.ones(1, 2, 8)
-    trainer.compute_estimates(binaural)
+    binaural = torch.ones(1, 1, 2, 8)
+    spk_filters = torch.ones(1, 2, 32)
+    trainer.compute_estimates(binaural, spk_filters, listener_idx=0)
 
-    loss_dict = trainer.compute_loss({"_MockListenerModel": torch.tensor([0.0])})
+    loss_dict = trainer.compute_loss({"_MockListenerModel": torch.tensor([[0.0]])})
 
-    per_model_loss = F.mse_loss(torch.tensor([2.0]), torch.tensor([0.0]))
+    per_model_loss = F.mse_loss(torch.tensor([[2.0]]), torch.tensor([[0.0]]))
     assert loss_dict["_MockListenerModel"].item() == pytest.approx(per_model_loss * 2.0)
     assert loss_dict["total"].item() == pytest.approx(per_model_loss * 4.0)
