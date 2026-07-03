@@ -148,12 +148,12 @@ class llado2025_grad_surgery(nn.Module):
 
     def _compute_ild(self, rectified_signals):
         left_signals = rectified_signals[:,:,0,:]
-        right_signals = torch.flip(rectified_signals[:,:,1,:], dims=[-1])
+        right_signals = rectified_signals[:,:,1,:]
         
         # Louder left signals results in positive ILD, louder right signals results in negative ILD
         ild = (
-            20 * torch.log10(torch.sqrt(torch.sum(left_signals**2, dim=-1) + 1e-12))
-            - 20 * torch.log10(torch.sqrt(torch.sum(right_signals**2, dim=-1) + 1e-12))
+            20 * torch.log10(torch.sqrt(torch.sum(left_signals**2, dim=-1).clamp(min=1e-12)))
+            - 20 * torch.log10(torch.sqrt(torch.sum(right_signals**2, dim=-1).clamp(min=1e-12)))
         )
         return ild
 

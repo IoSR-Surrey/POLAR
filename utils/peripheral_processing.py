@@ -38,8 +38,8 @@ def compute_ild(rectified_signals):
     
     # Louder left signals results in positive ILD, louder right signals results in negative ILD
     ild = (
-        20 * torch.log10(torch.sqrt(torch.sum(left_signals**2, dim=-1) + 1e-12))
-        - 20 * torch.log10(torch.sqrt(torch.sum(right_signals**2, dim=-1) + 1e-12))
+        20 * torch.log10(torch.sqrt(torch.sum(left_signals**2, dim=-1). clamp(min=1e-12)))
+        - 20 * torch.log10(torch.sqrt(torch.sum(right_signals**2, dim=-1). clamp(min=1e-12)))
     )
     return ild
 
