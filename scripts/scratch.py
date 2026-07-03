@@ -16,6 +16,7 @@ from utils.miscellaneous import load_npy_to_torch
 
 from models.listener_based.llado2025.model import llado2025_grad_surgery
 from models.listener_based.desena2020.model import desena2020
+from models.louspeaker_based.second_moment.model import SecondMoment
 from models.train import ModelTrainer
 
 from filter_estimation.model import MultiSourceFIR
@@ -37,16 +38,20 @@ lstn_pos = torch.tensor([[0, 0]])
 spk_pos = torch.tensor([[d*torch.cos(torch.deg2rad(torch.tensor(30))), d*torch.sin(torch.deg2rad(torch.tensor(30)))], 
                         [d*torch.cos(torch.deg2rad(torch.tensor(30))), -d*torch.sin(torch.deg2rad(torch.tensor(30)))]])
 
+target_angle = 15.0
 llado_model = llado2025_grad_surgery(48000, hrirs, gtfb)
 desena_model = desena2020(48000, hrirs, gtfb)
-modelTrainer = ModelTrainer([desena_model,], weights=[1.0, 0.0])
-target_angle = 15.0
-targets = {"desena2020": torch.tensor([target_angle])}
 
 prop = BinauralFreeFieldPropagation(48000, lstn_pos, spk_pos, sofaile)
 
-nn = MultiSourceFIR(32, 2)
+n_sources = len(spk_pos)
+n_taps = 32
+nn = MultiSourceFIR(n_taps, n_sources)
 nn.set_filter_initialisation("middle")
+second_moment_model = SecondMoment(n_taps, n_sources)
+
+modelTrainer = ModelTrainer([llado_model, second_moment_model], weights=[1.0, 1.0])
+targets = {"llado2025_grad_surgery": torch.tensor([target_angle]), "SecondMoment": torch.tensor([0.0])}
 
 stim = torch.ones(1,1,1)
 
@@ -69,20 +74,15 @@ for i in range(100):
 
     binaural_signals = prop(stim, spk_filters)
 
-    N_signals = binaural_signals.shape[0]
-    N_listeners = binaural_signals.shape[1]
-    binaural_signals = binaural_signals.view(N_signals*N_listeners, 2, -1)
-
-    modelTrainer.compute_estimates(binaural_signals)
+    modelTrainer.compute_estimates(binaural_signals, spk_filters, listener_idx=0)
     loss_dict = modelTrainer.compute_loss(targets)
 
-    ## DEBUG
-    LOSS_DEBUG = loss_dict['total'] / 3600
-
     optimizer.zero_grad()
-    LOSS_DEBUG.backward(retain_graph=True)
+    loss_dict['total'].backward(retain_graph=True)
     
     # Saving after backward to have the gradients available
+    saving_manager.save("loss_dict", loss_dict)
+    saving_manager.save("modelTrainer.estimates", modelTrainer.estimates)
     saving_manager.save_branch_grads(modelTrainer)
     saving_manager.save_filter_tap_branch_grads(modelTrainer, nn)
     
