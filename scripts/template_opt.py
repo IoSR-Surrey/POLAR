@@ -22,7 +22,7 @@ from logger.printing import print_loss_and_estimates
 
 
 # Get the hyperparameters
-with open("utils/hyperpameters.json", "r") as f:
+with open("config/hyperpameters.json", "r") as f:
     hyperpameters = json.load(f)
 
 env_config = hyperpameters["env"]
