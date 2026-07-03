@@ -34,7 +34,7 @@ def compute_itd(iacc, tau_iacc, lag_values):
 
 def compute_ild(rectified_signals):
     left_signals = rectified_signals[:,:,0,:]
-    right_signals = torch.flip(rectified_signals[:,:,1,:], dims=[-1])
+    right_signals = rectified_signals[:,:,1,:]
     
     # Louder left signals results in positive ILD, louder right signals results in negative ILD
     ild = (
