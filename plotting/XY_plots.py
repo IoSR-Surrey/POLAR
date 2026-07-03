@@ -140,3 +140,39 @@ def filter_tap_branch_grad_norms_over_epochs_plot(grad_norm_itd_on_taps, grad_no
     plt.ylabel("Grad norm")
     plt.grid(True)
     plt.tight_layout()
+
+
+def plot_loss_and_estimates(loss_dict, estimates, title):
+
+    n_epochs = len(loss_dict)
+    keys = [key for key in loss_dict[0].keys() if key != "total"]
+
+    for key in keys:
+        losses = np.squeeze(ready_for_plotting([loss_dict[epoch][key] for epoch in range(n_epochs)]))
+        model_estimates = np.asarray(ready_for_plotting([estimates[epoch][key] for epoch in range(n_epochs)]))
+
+        plt.figure()
+        plt.subplot(2, 1, 1)
+        plt.plot(losses)
+        plt.title(f"{key} loss over epochs for {title}")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.grid(True)
+        plt.subplot(2, 1, 2)
+        for i in range(model_estimates.shape[1]):
+            plt.plot(model_estimates[:, 0, i])
+        plt.title(f"{key} estimate over epochs for {title}")
+        plt.xlabel("Epoch")
+        plt.ylabel("Estimate")
+        plt.grid(True)
+        plt.tight_layout()
+
+    if "total" in loss_dict[0]:
+        total_losses = np.squeeze(ready_for_plotting([loss_dict[epoch]["total"] for epoch in range(n_epochs)]))
+        plt.figure()
+        plt.plot(total_losses)
+        plt.title(f"Total loss over epochs for {title}")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.grid(True)
+        plt.tight_layout()

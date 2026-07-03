@@ -9,7 +9,8 @@ from plotting.XY_plots import (time_domain_filters_plot,
                      cosine_similarity_over_epochs_plot,
                      grad_norms_over_epochs_plot,
                      filter_tap_branch_grad_norms_over_epochs_plot,
-                     filter_tap_branch_cosine_similarity_over_epochs_plot)
+                     filter_tap_branch_cosine_similarity_over_epochs_plot,
+                     plot_loss_and_estimates)
 from plotting.scatter_plots import itd_ild_scatter_plot
 
 
@@ -29,6 +30,7 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager):
     grad_norms_over_epochs_plot(saving_manager.saved_data["rectified_signals_grad_itd"], saving_manager.saved_data["rectified_signals_grad_ild"], "Grad Norms Plot")
     filter_tap_branch_grad_norms_over_epochs_plot(saving_manager.saved_data["grad_itd_on_taps_norm"], saving_manager.saved_data["grad_ild_on_taps_norm"])
     filter_tap_branch_cosine_similarity_over_epochs_plot(saving_manager.saved_data["grad_itd_on_taps"], saving_manager.saved_data["grad_ild_on_taps"], "Filter Taps")
+    plot_loss_and_estimates(saving_manager.saved_data["loss_dict"], saving_manager.saved_data["modelTrainer.estimates"], "Loss and Estimates")
     _close_buttons = create_close_button()
     plt.show()
 
