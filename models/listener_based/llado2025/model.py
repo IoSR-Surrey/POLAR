@@ -14,6 +14,8 @@ class llado2025(nn.Module):
     def __init__(self, fs, hrirs, gtfb, tau_iacc=1e-2, device='cpu', dtype=torch.float32):
         super(llado2025, self).__init__()
 
+        self.model_type = 'listener_based'
+
         self.fs = fs
         self.hrirs = hrirs
         self.gtfb = gtfb
@@ -72,6 +74,8 @@ class llado2025_grad_surgery(nn.Module):
 
     def __init__(self, fs, hrirs, gtfb, tau_iacc=1e-2, device='cpu', dtype=torch.float32):
         super(llado2025_grad_surgery, self).__init__()
+
+        self.model_type = 'listener_based'
 
         self.fs = fs
         self.hrirs = hrirs

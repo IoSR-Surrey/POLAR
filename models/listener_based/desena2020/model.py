@@ -11,6 +11,8 @@ class desena2020(nn.Module):
     def __init__(self, fs, hrirs, gtfb, tau_iacc=1e-2, device='cpu', dtype=torch.float32):
         super(desena2020, self).__init__()
 
+        self.model_type = 'listener_based'
+
         self.fs = fs
         self.hrirs = hrirs
         self.gtfb = gtfb

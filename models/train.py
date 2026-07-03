@@ -24,17 +24,30 @@ class ModelTrainer:
     def __init__(self, models, criterions = None, weights=None):
         self.model_dict = create_model_dict(models, criterions, weights)
 
-    def compute_estimates(self, binaural_signals):
+    def compute_estimates(self, binaural_signals, spk_filters, listener_idx):
+
+        N_signals = binaural_signals.shape[0]
+        N_listeners = binaural_signals.shape[1]
+        N_sources = spk_filters.shape[1]
+        binaural_signals = binaural_signals.view(N_signals*N_listeners, 2, -1)
 
         self.estimates = {}
         self.kwargs_output = {}
         
         for model_name, model in self.model_dict.items():
-
-            output = model['model'](binaural_signals)
-            self.estimates[model_name] = output['output']
-            self.kwargs_output[model_name] = output['kwargs']
-
+            
+            if model['model'].model_type == 'listener_based':
+                output = model['model'](binaural_signals)
+                self.estimates[model_name] = output['output'].view(N_signals, N_listeners)
+                self.kwargs_output[model_name] = output['kwargs']
+            
+            elif model['model'].model_type == 'loudspeaker_based':
+                output = model['model'](spk_filters)
+                self.estimates[model_name] = output['output'].view(1, N_sources) # This is done to match the shape of the listener-based models
+                self.kwargs_output[model_name] = output['kwargs']
+            
+            else:
+                raise ValueError(f"Model type {model['model'].model_type} not supported")
 
     def compute_loss(self, targets):
 
