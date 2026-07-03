@@ -186,6 +186,7 @@ class llado2025_grad_surgery(nn.Module):
         return {"itd": itd, 
                 "ild": ild,
                 "gtfb_signals": gtfb_signals,
+                "rectified_signals": rectified_signals,
                 "rectified_signals_itd": rectified_itd,
                 "rectified_signals_ild": rectified_ild,
                 "rectified_signals_grad_itd": ItdIldDBranchGradNormFn.last_itd_grad,

@@ -2,7 +2,7 @@ import json
 import torch
 import torch.nn as nn
 
-with open('utils/hyperpameters.json', 'r') as f:
+with open('config/hyperpameters.json', 'r') as f:
     hyperpameters = json.load(f)
     apply_init_branch_grad_norm = hyperpameters["llado2025_grad_surgery"]["apply_init_branch_grad_norm"]
 
