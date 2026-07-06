@@ -32,14 +32,20 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager):
     n_listeners, listener_labels = get_listener_plot_info(saving_manager)
 
     time_domain_filters_plot(spk_filters)
+    saving_manager.save_new_plots("time_domain_filters")
     frequency_domain_filters_plot(spk_filters)
+    saving_manager.save_new_plots("frequency_domain_filters")
     itd_ild_scatter_plot(
         binaural_signals, sofaile, target_angle, gtfb, lag_values, tau_iacc,
         n_listeners=n_listeners, listener_labels=listener_labels,
     )
+    saving_manager.save_new_plots("itd_ild_scatter")
     grad_norms_over_epochs_plot(saving_manager.saved_data["rectified_signals_grad_itd"], saving_manager.saved_data["rectified_signals_grad_ild"], "Grad Norms Plot")
+    saving_manager.save_new_plots("rectified_signals_grad_norms")
     filter_tap_branch_grad_norms_over_epochs_plot(saving_manager.saved_data["grad_itd_on_taps_norm"], saving_manager.saved_data["grad_ild_on_taps_norm"])
+    saving_manager.save_new_plots("filter_tap_branch_grad_norms")
     filter_tap_branch_cosine_similarity_over_epochs_plot(saving_manager.saved_data["grad_itd_on_taps"], saving_manager.saved_data["grad_ild_on_taps"], "Filter Taps")
+    saving_manager.save_new_plots("filter_tap_branch_cosine_similarity")
     plot_loss_and_estimates(
         saving_manager.saved_data["loss_dict"],
         saving_manager.saved_data["modelTrainer.estimates"],
@@ -47,16 +53,23 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager):
         n_listeners=n_listeners,
         listener_labels=listener_labels,
     )
+    loss_names = [f"loss_and_estimates_{key}" for key in saving_manager.saved_data["loss_dict"][0].keys() if key != "total"]
+    if "total" in saving_manager.saved_data["loss_dict"][0]:
+        loss_names.append("loss_and_estimates_total")
+    saving_manager.save_new_plots("loss_and_estimates", names=loss_names)
     if "loss_grad_vectors" in saving_manager.saved_data:
         task_grad_pairwise_cosine_similarity_plot(
             **task_grad_pairwise_cosine_similarity_stats(saving_manager.saved_data["loss_grad_vectors"]),
             title="Task Gradients on Filter Taps",
         )
+        saving_manager.save_new_plots("task_grad_pairwise_cosine_similarity")
     if "loss_grad_norms" in saving_manager.saved_data:
         loss_grad_norms_over_epochs_plot(saving_manager.saved_data["loss_grad_norms"], "Effective Loss Grad Norms")
+        saving_manager.save_new_plots("loss_grad_norms")
     if "gradnorm_task_weights" in saving_manager.saved_data:
         task_names = [key for key in saving_manager.saved_data["loss_dict"][0].keys() if key != "total"]
         gradnorm_task_weights_over_epochs_plot(saving_manager.saved_data["gradnorm_task_weights"], task_names, "GradNorm Task Weights")
+        saving_manager.save_new_plots("gradnorm_task_weights")
     if all(key in saving_manager.saved_data for key in ("lstn_pos", "spk_pos", "localisation_angles", "localisation_uncertainty")):
         localisation_arrows_plot(
             saving_manager.saved_data["lstn_pos"][0],
@@ -66,6 +79,7 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager):
             target_angle=target_angle,
             listener_labels=listener_labels,
         )
+        saving_manager.save_new_plots("localisation_arrows")
     _close_buttons = create_close_button()
     plt.show()
 

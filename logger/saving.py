@@ -6,6 +6,8 @@ class SavingManager:
     def __init__(self):
         
         self.saved_data = {}
+        self.output_dir = None
+        self._seen_fignums = set()
 
     def save(self, key, value):
         if key not in self.saved_data:
@@ -61,7 +63,31 @@ class SavingManager:
         with open(output_dir / "manifest.json", "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
 
+        self.output_dir = output_dir
+        self._seen_fignums = set()
         return output_dir
+
+    def save_new_plots(self, basename, names=None):
+        import matplotlib.pyplot as plt
+
+        if self.output_dir is None:
+            self._seen_fignums = set(plt.get_fignums())
+            return
+
+        plot_dir = self.output_dir / "plots"
+        plot_dir.mkdir(exist_ok=True)
+
+        new_fignums = sorted(n for n in plt.get_fignums() if n not in self._seen_fignums)
+        for i, fig_num in enumerate(new_fignums):
+            if names is not None and i < len(names):
+                filename = names[i]
+            elif len(new_fignums) == 1:
+                filename = basename
+            else:
+                filename = f"{basename}_{i}"
+            plt.figure(fig_num).savefig(plot_dir / f"{filename}.png", bbox_inches="tight", dpi=150)
+
+        self._seen_fignums |= set(new_fignums)
 
 ############################################################################################################################################################
 ############################################################################################################################################################

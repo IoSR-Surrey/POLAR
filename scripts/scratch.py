@@ -31,7 +31,9 @@ from logger.printing import print_loss_and_estimates
 from logger.saving import SavingManager, extract_loss_grad_norms
 
 with open('config/hyperpameters.json', 'r') as f:
-    use_gradnorm = json.load(f)["training"]["use_gradnorm"]
+    config = json.load(f)
+use_gradnorm = config["training"]["use_gradnorm"]
+skip_keys = config["saving"]["skip_keys"]
     
 sofaile = load_sofa("data/SOFA/SYMMETRIC_D1_48K_24bit_256tap_FIR_SOFA.sofa")
 hrirs = get_template_for_llado2025_desena_2020(sofaile)
@@ -122,7 +124,7 @@ saving_manager.save("localisation_angles", localisation_angles)
 saving_manager.save("localisation_uncertainty", localisation_uncertainty)
 saving_manager.save("spk_filters", spk_filters)
 
-run_dir = saving_manager.export_to_disk("outputs/scratch", timestamp=True)
+run_dir = saving_manager.export_to_disk("outputs/scratch", skip_keys=skip_keys, timestamp=True)
 print(f"Saved outputs to {run_dir}")
 
 ALL_PLOTTING_FUNCTIONS(saving_manager)
