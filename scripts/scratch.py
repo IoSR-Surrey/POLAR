@@ -13,7 +13,7 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
 from utils.sofa_functions import load_sofa, get_template_for_llado2025_desena_2020
-from utils.miscellaneous import load_npy_to_torch
+from utils.miscellaneous import load_npy_to_torch, target_angle_for_listeners
 
 from models.listener_based.llado2025.model import llado2025_grad_surgery
 from models.listener_based.desena2020.model import desena2020
@@ -44,6 +44,8 @@ spk_pos = torch.tensor([[d*torch.cos(torch.deg2rad(torch.tensor(30))), d*torch.s
                         [d*torch.cos(torch.deg2rad(torch.tensor(30))), -d*torch.sin(torch.deg2rad(torch.tensor(30)))]])
 
 target_angle = 0.0
+target_position = torch.tensor([d * torch.cos(torch.deg2rad(torch.tensor(target_angle))), d * torch.sin(torch.deg2rad(torch.tensor(target_angle)))])
+
 llado_model = llado2025_grad_surgery(48000, hrirs, gtfb)
 desena_model = desena2020(48000, hrirs, gtfb)
 
@@ -55,8 +57,8 @@ nn = MultiSourceFIR(n_taps, n_sources)
 nn.set_filter_initialisation("middle")
 second_moment_model = SecondMoment(n_taps, n_sources)
 
-modelTrainer = ModelTrainer([llado_model, desena_model, second_moment_model], weights=[1.0, 1.0, 0.1])
-targets = {"llado2025_grad_surgery": torch.tensor([[target_angle]]), "desena2020": torch.tensor([[0.0]]), "SecondMoment": torch.tensor([[0.0]])}
+modelTrainer = ModelTrainer([llado_model], weights=[1.0])
+targets = {"llado2025_grad_surgery": target_angle_for_listeners(lstn_pos, target_position).unsqueeze(0)}
 
 stim = torch.ones(1,1,1)
 
@@ -112,8 +114,15 @@ with torch.no_grad():
     binaural_signals = binaural_signals.view(
         binaural_signals.shape[0] * binaural_signals.shape[1], 2, -1
     )
+    localisation_angles = llado_model(binaural_signals)["output"]
+    localisation_uncertainty = desena_model(binaural_signals)["output"]
 
 saving_manager.save("binaural_signals", binaural_signals)
+saving_manager.save("localisation_angles", localisation_angles)
+saving_manager.save("localisation_uncertainty", localisation_uncertainty)
 saving_manager.save("spk_filters", spk_filters)
+
+run_dir = saving_manager.export_to_disk("outputs/scratch", timestamp=True)
+print(f"Saved outputs to {run_dir}")
 
 ALL_PLOTTING_FUNCTIONS(saving_manager)

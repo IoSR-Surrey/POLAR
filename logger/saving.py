@@ -34,8 +34,32 @@ class SavingManager:
     def save_loss_grad_vectors(self, loss_dict, filter_module):
         self.save("loss_grad_vectors", extract_loss_grad_vectors(loss_dict, filter_module))
 
+    def export_to_disk(self, output_dir, skip_keys=None, timestamp=False):
+        """Write saved_data to output_dir as .npy and .json files."""
+        from datetime import datetime
+        from pathlib import Path
+        import json
 
+        output_dir = Path(output_dir)
+        if timestamp:
+            output_dir = output_dir / datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        skip_keys = set(skip_keys) if skip_keys is not None else {"sofaile"}
 
+        manifest = {}
+        for key, values in self.saved_data.items():
+            if key in skip_keys:
+                manifest[key] = {"skipped": True, "reason": "in skip_keys"}
+                continue
+            try:
+                manifest[key] = _export_saved_values(key, values, output_dir)
+            except Exception as exc:
+                manifest[key] = {"skipped": True, "reason": str(exc)}
+
+        with open(output_dir / "manifest.json", "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+
+        return output_dir
 
 ############################################################################################################################################################
 ############################################################################################################################################################
@@ -43,10 +67,122 @@ class SavingManager:
 ############################################################################################################################################################
 ############################################################################################################################################################
 
+import json
+from pathlib import Path
+
 import numpy as np
 import torch
 from utils.dsp import cosine_similarity
 from models.listener_based.llado2025.grad_surgery import ItdIldDBranchGradNormFn
+
+
+def _to_numpy(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    if isinstance(value, np.ndarray):
+        return value
+    if isinstance(value, (int, float, bool, str)) or value is None:
+        return value
+    if isinstance(value, dict):
+        return {k: _to_numpy(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        if all(isinstance(x, (torch.Tensor, np.ndarray, type(None))) for x in value):
+            parts = [_to_numpy(x).ravel() for x in value if x is not None]
+            if not parts:
+                return None
+            return np.concatenate(parts)
+        return [_to_numpy(x) for x in value]
+    raise TypeError(f"Unsupported type for export: {type(value)}")
+
+
+def _is_scalar_like(value):
+    if isinstance(value, (int, float, bool, str)) or value is None:
+        return True
+    if isinstance(value, np.ndarray):
+        return value.ndim == 0
+    return False
+
+
+def _json_ready(value):
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return value.item()
+        return value.tolist()
+    if isinstance(value, dict):
+        return {k: _json_ready(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(v) for v in value]
+    return value
+
+
+def _can_stack(arrays):
+    if not arrays:
+        return False
+    if all(_is_scalar_like(x) for x in arrays):
+        return True
+    if not all(isinstance(x, np.ndarray) for x in arrays):
+        return False
+    shapes = {x.shape for x in arrays}
+    return len(shapes) == 1
+
+
+def _stack_values(values):
+    converted = [_to_numpy(v) for v in values]
+    if _can_stack(converted):
+        if all(_is_scalar_like(x) for x in converted):
+            return np.array([x.item() if isinstance(x, np.ndarray) else x for x in converted])
+        return np.stack(converted)
+    return converted
+
+
+def _write_json(path, value):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(_json_ready(value), f, indent=2)
+
+
+def _write_npy(path, value):
+    np.save(path, value)
+
+
+def _export_saved_values(key, values, output_dir):
+    converted = [_to_numpy(v) for v in values]
+
+    if converted and all(isinstance(v, dict) for v in converted):
+        return _export_dict_series(key, converted, output_dir)
+
+    if len(converted) == 1:
+        single = converted[0]
+        if _is_scalar_like(single):
+            path = output_dir / f"{key}.json"
+            _write_json(path, single.item() if isinstance(single, np.ndarray) else single)
+            return {"format": "json", "path": path.name, "n_entries": 1}
+        if isinstance(single, np.ndarray):
+            path = output_dir / f"{key}.npy"
+            _write_npy(path, single)
+            return {"format": "npy", "path": path.name, "shape": list(single.shape), "n_entries": 1}
+        path = output_dir / f"{key}.json"
+        _write_json(path, single)
+        return {"format": "json", "path": path.name, "n_entries": 1}
+
+    stacked = _stack_values(values)
+    if isinstance(stacked, np.ndarray):
+        path = output_dir / f"{key}.npy"
+        _write_npy(path, stacked)
+        return {"format": "npy", "path": path.name, "shape": list(stacked.shape), "n_entries": len(values)}
+
+    path = output_dir / f"{key}.json"
+    _write_json(path, converted)
+    return {"format": "json", "path": path.name, "n_entries": len(values)}
+
+
+def _export_dict_series(key, dict_series, output_dir):
+    subkeys = dict_series[0].keys()
+    entries = {}
+    for subkey in subkeys:
+        sub_values = [entry[subkey] for entry in dict_series]
+        sub_key = f"{key}.{subkey}"
+        entries[subkey] = _export_saved_values(sub_key, sub_values, output_dir)
+    return {"format": "dict_series", "subkeys": entries, "n_entries": len(dict_series)}
 
 
 def _populate_llado_branch_grads(model_trainer):
