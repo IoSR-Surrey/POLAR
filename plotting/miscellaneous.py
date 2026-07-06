@@ -17,6 +17,7 @@ from plotting.XY_plots import (time_domain_filters_plot,
                      gradnorm_task_weights_over_epochs_plot,
                      task_grad_pairwise_cosine_similarity_plot)
 from plotting.scatter_plots import itd_ild_scatter_plot
+from plotting.spatial_plots import localisation_arrows_plot
 
 
 def ALL_PLOTTING_FUNCTIONS(saving_manager):
@@ -56,6 +57,15 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager):
     if "gradnorm_task_weights" in saving_manager.saved_data:
         task_names = [key for key in saving_manager.saved_data["loss_dict"][0].keys() if key != "total"]
         gradnorm_task_weights_over_epochs_plot(saving_manager.saved_data["gradnorm_task_weights"], task_names, "GradNorm Task Weights")
+    if all(key in saving_manager.saved_data for key in ("lstn_pos", "spk_pos", "localisation_angles", "localisation_uncertainty")):
+        localisation_arrows_plot(
+            saving_manager.saved_data["lstn_pos"][0],
+            saving_manager.saved_data["spk_pos"][0],
+            saving_manager.saved_data["localisation_angles"][0],
+            saving_manager.saved_data["localisation_uncertainty"][0],
+            target_angle=target_angle,
+            listener_labels=listener_labels,
+        )
     _close_buttons = create_close_button()
     plt.show()
 
