@@ -5,28 +5,18 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 
 from utils.miscellaneous import ready_for_plotting
+from logger.saving import task_grad_pairwise_cosine_similarity_stats
 from plotting.XY_plots import (time_domain_filters_plot,
                      frequency_domain_filters_plot,
                      cosine_similarity_over_epochs_plot,
                      grad_norms_over_epochs_plot,
                      filter_tap_branch_grad_norms_over_epochs_plot,
                      filter_tap_branch_cosine_similarity_over_epochs_plot,
-                     plot_loss_and_estimates)
+                     plot_loss_and_estimates,
+                     loss_grad_norms_over_epochs_plot,
+                     gradnorm_task_weights_over_epochs_plot,
+                     task_grad_pairwise_cosine_similarity_plot)
 from plotting.scatter_plots import itd_ild_scatter_plot
-
-
-def listener_labels_from_lstn_pos(lstn_pos):
-    lstn_pos = ready_for_plotting(lstn_pos)
-    return [f"VL {i} ({pos[0]:.2g}, {pos[1]:.2g})" for i, pos in enumerate(lstn_pos)]
-
-
-def get_listener_plot_info(saving_manager):
-    if "lstn_pos" not in saving_manager.saved_data:
-        return 1, None
-
-    lstn_pos = saving_manager.saved_data["lstn_pos"][0]
-    n_listeners = len(ready_for_plotting(lstn_pos))
-    return n_listeners, listener_labels_from_lstn_pos(lstn_pos)
 
 
 def ALL_PLOTTING_FUNCTIONS(saving_manager):
@@ -56,9 +46,31 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager):
         n_listeners=n_listeners,
         listener_labels=listener_labels,
     )
+    if "loss_grad_vectors" in saving_manager.saved_data:
+        task_grad_pairwise_cosine_similarity_plot(
+            **task_grad_pairwise_cosine_similarity_stats(saving_manager.saved_data["loss_grad_vectors"]),
+            title="Task Gradients on Filter Taps",
+        )
+    if "loss_grad_norms" in saving_manager.saved_data:
+        loss_grad_norms_over_epochs_plot(saving_manager.saved_data["loss_grad_norms"], "Effective Loss Grad Norms")
+    if "gradnorm_task_weights" in saving_manager.saved_data:
+        task_names = [key for key in saving_manager.saved_data["loss_dict"][0].keys() if key != "total"]
+        gradnorm_task_weights_over_epochs_plot(saving_manager.saved_data["gradnorm_task_weights"], task_names, "GradNorm Task Weights")
     _close_buttons = create_close_button()
     plt.show()
 
+def listener_labels_from_lstn_pos(lstn_pos):
+    lstn_pos = ready_for_plotting(lstn_pos)
+    return [f"VL {i} ({pos[0]:.2g}, {pos[1]:.2g})" for i, pos in enumerate(lstn_pos)]
+
+
+def get_listener_plot_info(saving_manager):
+    if "lstn_pos" not in saving_manager.saved_data:
+        return 1, None
+
+    lstn_pos = saving_manager.saved_data["lstn_pos"][0]
+    n_listeners = len(ready_for_plotting(lstn_pos))
+    return n_listeners, listener_labels_from_lstn_pos(lstn_pos)
 
 
 def close_all(_event):

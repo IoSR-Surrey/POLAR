@@ -28,7 +28,7 @@ from propagation.model import BinauralFreeFieldPropagation
 from plotting.miscellaneous import ALL_PLOTTING_FUNCTIONS
 
 from logger.printing import print_loss_and_estimates
-from logger.saving import SavingManager
+from logger.saving import SavingManager, extract_loss_grad_norms
 
 with open('config/hyperpameters.json', 'r') as f:
     use_gradnorm = json.load(f)["training"]["use_gradnorm"]
@@ -55,8 +55,8 @@ nn = MultiSourceFIR(n_taps, n_sources)
 nn.set_filter_initialisation("middle")
 second_moment_model = SecondMoment(n_taps, n_sources)
 
-modelTrainer = ModelTrainer([llado_model, desena_model], weights=[100.0, 1.0])
-targets = {"llado2025_grad_surgery": torch.tensor([[target_angle]]), "desena2020": torch.tensor([[0.0]])}
+modelTrainer = ModelTrainer([llado_model, desena_model, second_moment_model], weights=[1.0, 1.0, 0.1])
+targets = {"llado2025_grad_surgery": torch.tensor([[target_angle]]), "desena2020": torch.tensor([[0.0]]), "SecondMoment": torch.tensor([[0.0]])}
 
 stim = torch.ones(1,1,1)
 
@@ -77,7 +77,7 @@ saving_manager.save("sofaile", sofaile)
 
 
 dummy_input = torch.ones(1,1)
-for i in range(100):
+for i in range(500):
 
     spk_filters = nn(dummy_input)
 
@@ -89,6 +89,8 @@ for i in range(100):
     optimizer.zero_grad()
     saving_manager.save("loss_dict", loss_dict)
     saving_manager.save("modelTrainer.estimates", modelTrainer.estimates)
+    loss_grad_norms = extract_loss_grad_norms(loss_dict, nn)
+    saving_manager.save_loss_grad_vectors(loss_dict, nn)
     saving_manager.save_branch_grads(modelTrainer)
     saving_manager.save_filter_tap_branch_grads(modelTrainer, nn)
     
@@ -96,9 +98,11 @@ for i in range(100):
         gradnorm_info = gradnorm.step(loss_dict, list(nn.parameters()), optimizer)
         saving_manager.save("gradnorm_task_weights", gradnorm_info["task_weights"])
         saving_manager.save("gradnorm_grad_norms", gradnorm_info["grad_norms"])
+        saving_manager.save_effective_loss_grad_norms(loss_grad_norms, modelTrainer, gradnorm_info["task_weights"])
     else:
         loss_dict['total'].backward()
         optimizer.step()
+        saving_manager.save_effective_loss_grad_norms(loss_grad_norms, modelTrainer)
     
     print_loss_and_estimates(loss_dict, modelTrainer.estimates, i)
 

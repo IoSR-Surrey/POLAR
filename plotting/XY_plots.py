@@ -183,3 +183,71 @@ def plot_loss_and_estimates(loss_dict, estimates, title, n_listeners=None, liste
         plt.ylabel("Loss")
         plt.grid(True)
         plt.tight_layout()
+
+
+def loss_grad_norms_over_epochs_plot(loss_grad_norms, title):
+
+    n_epochs = len(loss_grad_norms)
+    keys = [key for key in loss_grad_norms[0].keys() if key != "total"]
+
+    plt.figure()
+    for key in keys:
+        grad_norms = np.squeeze(ready_for_plotting([loss_grad_norms[epoch][key] for epoch in range(n_epochs)]))
+        plt.plot(grad_norms, label=key)
+    plt.legend()
+    plt.title(f"Effective loss grad norms on filter taps for {title}")
+    plt.xlabel("Epoch")
+    plt.ylabel("Effective grad norm")
+    plt.grid(True)
+    plt.tight_layout()
+
+
+def task_grad_pairwise_cosine_similarity_plot(task_names, mean_matrix, pairwise_labels, pairwise_over_epochs, ref_cosines_over_epochs, title):
+
+    mean_matrix = ready_for_plotting(mean_matrix)
+    n_tasks = len(task_names)
+
+    fig, axes = plt.subplots(3, 1, figsize=(8, 14))
+
+    im = axes[0].imshow(mean_matrix, vmin=-1, vmax=1, cmap="RdBu_r")
+    axes[0].set_xticks(range(n_tasks))
+    axes[0].set_yticks(range(n_tasks))
+    axes[0].set_xticklabels(task_names, rotation=45, ha="right")
+    axes[0].set_yticklabels(task_names)
+    axes[0].set_title(f"Pairwise task grad cosine similarity (mean over epochs) for {title}")
+    for i in range(n_tasks):
+        for j in range(n_tasks):
+            axes[0].text(j, i, f"{mean_matrix[i, j]:.2f}", ha="center", va="center")
+    fig.colorbar(im, ax=axes[0])
+
+    for label, cosines in zip(pairwise_labels, pairwise_over_epochs):
+        axes[1].plot(ready_for_plotting(cosines), label=label)
+    axes[1].set_xlabel("Epoch")
+    axes[1].set_ylabel("Cosine Similarity")
+    axes[1].set_title(f"Pairwise task grad cosine similarity over epochs for {title}")
+    axes[1].legend()
+    axes[1].grid(True)
+
+    for name in task_names:
+        axes[2].plot(ref_cosines_over_epochs[name], label=name)
+    axes[2].set_xlabel("Epoch")
+    axes[2].set_ylabel("Cosine Similarity")
+    axes[2].set_title(f"Task grad cosine similarity to fixed reference [1, 0, ...] for {title}")
+    axes[2].legend()
+    axes[2].grid(True)
+    plt.tight_layout()
+
+
+def gradnorm_task_weights_over_epochs_plot(gradnorm_task_weights, task_names, title):
+
+    weights = np.asarray(ready_for_plotting(gradnorm_task_weights))
+
+    plt.figure()
+    for i, name in enumerate(task_names):
+        plt.plot(weights[..., i], label=name)
+    plt.legend()
+    plt.title(f"GradNorm task weights over epochs for {title}")
+    plt.xlabel("Epoch")
+    plt.ylabel("Task weight")
+    plt.grid(True)
+    plt.tight_layout()
