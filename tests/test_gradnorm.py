@@ -119,7 +119,7 @@ def test_gradnorm_balances_linear_task_slopes() -> None:
     assert baseline_ratio == pytest.approx(steep_slope / flat_slope)
 
     info = None
-    for _ in range(100):
+    for _ in range(200):
         optimizer.zero_grad()
         info = gradnorm.step(net.loss_dict(), shared_params, optimizer)
 
