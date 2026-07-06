@@ -44,6 +44,8 @@ class SavingManager:
         if timestamp:
             output_dir = output_dir / datetime.now().strftime("%Y-%m-%d_%H%M%S")
         output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "npy").mkdir(exist_ok=True)
+        (output_dir / "json").mkdir(exist_ok=True)
         skip_keys = set(skip_keys) if skip_keys is not None else {"sofaile"}
 
         manifest = {}
@@ -144,6 +146,14 @@ def _write_npy(path, value):
     np.save(path, value)
 
 
+def _npy_path(output_dir, key):
+    return output_dir / "npy" / f"{key}.npy"
+
+
+def _json_path(output_dir, key):
+    return output_dir / "json" / f"{key}.json"
+
+
 def _export_saved_values(key, values, output_dir):
     converted = [_to_numpy(v) for v in values]
 
@@ -153,26 +163,26 @@ def _export_saved_values(key, values, output_dir):
     if len(converted) == 1:
         single = converted[0]
         if _is_scalar_like(single):
-            path = output_dir / f"{key}.json"
+            path = _json_path(output_dir, key)
             _write_json(path, single.item() if isinstance(single, np.ndarray) else single)
-            return {"format": "json", "path": path.name, "n_entries": 1}
+            return {"format": "json", "path": path.relative_to(output_dir).as_posix(), "n_entries": 1}
         if isinstance(single, np.ndarray):
-            path = output_dir / f"{key}.npy"
+            path = _npy_path(output_dir, key)
             _write_npy(path, single)
-            return {"format": "npy", "path": path.name, "shape": list(single.shape), "n_entries": 1}
-        path = output_dir / f"{key}.json"
+            return {"format": "npy", "path": path.relative_to(output_dir).as_posix(), "shape": list(single.shape), "n_entries": 1}
+        path = _json_path(output_dir, key)
         _write_json(path, single)
-        return {"format": "json", "path": path.name, "n_entries": 1}
+        return {"format": "json", "path": path.relative_to(output_dir).as_posix(), "n_entries": 1}
 
     stacked = _stack_values(values)
     if isinstance(stacked, np.ndarray):
-        path = output_dir / f"{key}.npy"
+        path = _npy_path(output_dir, key)
         _write_npy(path, stacked)
-        return {"format": "npy", "path": path.name, "shape": list(stacked.shape), "n_entries": len(values)}
+        return {"format": "npy", "path": path.relative_to(output_dir).as_posix(), "shape": list(stacked.shape), "n_entries": len(values)}
 
-    path = output_dir / f"{key}.json"
+    path = _json_path(output_dir, key)
     _write_json(path, converted)
-    return {"format": "json", "path": path.name, "n_entries": len(values)}
+    return {"format": "json", "path": path.relative_to(output_dir).as_posix(), "n_entries": len(values)}
 
 
 def _export_dict_series(key, dict_series, output_dir):

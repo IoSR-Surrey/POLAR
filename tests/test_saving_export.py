@@ -24,14 +24,14 @@ def test_export_to_disk_mixed_formats(tmp_path):
         manifest = json.load(f)
 
     assert manifest["sofaile"]["skipped"] is True
-    assert (tmp_path / "target_angle.json").exists()
-    assert json.load(open(tmp_path / "target_angle.json", encoding="utf-8")) == 0.0
+    assert (tmp_path / "json" / "target_angle.json").exists()
+    assert json.load(open(tmp_path / "json" / "target_angle.json", encoding="utf-8")) == 0.0
 
-    gtfb = np.load(tmp_path / "gtfb.npy")
+    gtfb = np.load(tmp_path / "npy" / "gtfb.npy")
     assert gtfb.shape == (2, 3)
 
-    loss = np.load(tmp_path / "loss_dict.llado2025_grad_surgery.npy")
+    loss = np.load(tmp_path / "npy" / "loss_dict.llado2025_grad_surgery.npy")
     assert np.allclose(loss, [0.0, 1.0, 2.0])
 
-    total = np.load(tmp_path / "loss_dict.total.npy")
+    total = np.load(tmp_path / "npy" / "loss_dict.total.npy")
     assert np.allclose(total, [1.0, 2.0, 3.0])
