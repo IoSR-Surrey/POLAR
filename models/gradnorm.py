@@ -31,6 +31,7 @@ class GradNorm:
 
     def _renormalize_weights(self):
         with torch.no_grad():
+            self.weights.data.clamp_(min=1e-8)
             self.weights.data = self.weights.data * len(self.task_names) / self.weights.data.sum()
 
     def _task_losses(self, loss_dict):
