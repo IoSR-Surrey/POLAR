@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib import animation
 
 from utils.sofa_functions import sofa_find, get_IRs
 
@@ -27,30 +28,41 @@ def split_binaural_signals_by_listener(binaural_signals, n_listeners):
     return [binaural_signals[0, listener_idx][None, ...] for listener_idx in range(n_listeners)]
 
 
-def _itd_ild_scatter_on_axes(ax, binaural_signals, sofaile, target_angle, gtfb, lag_values, tau_iacc, title):
+def split_interaural_cues_by_listener(itd, ild, n_listeners):
+
+    itd = ready_for_plotting(itd)
+    ild = ready_for_plotting(ild)
+
+    if itd.ndim == 1:
+        return [(itd, ild)]
+
+    n_flat = itd.shape[0]
+    if n_flat == n_listeners:
+        return [(itd[listener_idx], ild[listener_idx]) for listener_idx in range(n_listeners)]
+
+    if n_flat % n_listeners != 0:
+        raise ValueError(
+            f"Cannot split {n_flat} interaural cue rows across {n_listeners} listeners"
+        )
+
+    itd = itd.reshape(n_flat // n_listeners, n_listeners, -1)
+    ild = ild.reshape(n_flat // n_listeners, n_listeners, -1)
+    return [(itd[0, listener_idx], ild[0, listener_idx]) for listener_idx in range(n_listeners)]
+
+
+def _compute_target_itd_ild(sofaile, target_angle, gtfb, lag_values, tau_iacc):
 
     idx = sofa_find(target_angle, sofaile)
     hrir = get_IRs(idx, sofaile)
-
-    estimated_interaural_cues = estimate_interaural_cues(binaural_signals, gtfb, lag_values, tau_iacc)
     target_interaural_cues = estimate_interaural_cues(hrir, gtfb, lag_values, tau_iacc)
-
-    estimated_itd = ready_for_plotting(estimated_interaural_cues['itd']).ravel()
-    estimated_ild = ready_for_plotting(estimated_interaural_cues['ild']).ravel()
-    target_itd = ready_for_plotting(target_interaural_cues['itd']).ravel()
-    target_ild = ready_for_plotting(target_interaural_cues['ild']).ravel()
-
-    pair_indices = np.arange(estimated_itd.size)
-
-    estimated_scatter = ax.scatter(
-        estimated_itd, estimated_ild,
-        c=pair_indices, cmap='viridis', marker='o', label='Estimated',
+    return (
+        ready_for_plotting(target_interaural_cues['itd']).ravel(),
+        ready_for_plotting(target_interaural_cues['ild']).ravel(),
     )
-    ax.scatter(
-        target_itd, target_ild,
-        c=pair_indices, cmap='viridis', marker='x', label='Target',
-    )
-    ax.legend()
+
+
+def _style_itd_ild_axes(ax):
+
     ax.set_xlabel('ITD [ms]')
     ax.set_ylabel('ILD [dB]')
     ax.grid(True)
@@ -58,8 +70,34 @@ def _itd_ild_scatter_on_axes(ax, binaural_signals, sofaile, target_angle, gtfb, 
     ax.set_ylim(-20, 20)
     ax.xaxis.set_major_locator(plt.MaxNLocator(5))
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{x * 1000:g}'))
+
+
+def _scatter_itd_ild_from_arrays(ax, estimated_itd, estimated_ild, target_itd, target_ild, title, draw_target=True):
+
+    pair_indices = np.arange(estimated_itd.size)
+
+    estimated_scatter = ax.scatter(
+        estimated_itd, estimated_ild,
+        c=pair_indices, cmap='viridis', marker='o', label='Estimated',
+    )
+    if draw_target:
+        ax.scatter(
+            target_itd, target_ild,
+            c=pair_indices, cmap='viridis', marker='x', label='Target',
+        )
+        ax.legend()
+    _style_itd_ild_axes(ax)
     ax.set_title(title)
     return estimated_scatter
+
+
+def _itd_ild_scatter_on_axes(ax, binaural_signals, sofaile, target_angle, gtfb, lag_values, tau_iacc, title):
+
+    estimated_interaural_cues = estimate_interaural_cues(binaural_signals, gtfb, lag_values, tau_iacc)
+    estimated_itd = ready_for_plotting(estimated_interaural_cues['itd']).ravel()
+    estimated_ild = ready_for_plotting(estimated_interaural_cues['ild']).ravel()
+    target_itd, target_ild = _compute_target_itd_ild(sofaile, target_angle, gtfb, lag_values, tau_iacc)
+    return _scatter_itd_ild_from_arrays(ax, estimated_itd, estimated_ild, target_itd, target_ild, title)
 
 
 def _add_critical_band_colorbar(fig, scatter, axes, label='Critical band index'):
@@ -109,3 +147,72 @@ def itd_ild_scatter_plot(binaural_signals, sofaile, target_angle, gtfb, lag_valu
     _add_critical_band_colorbar(fig, estimated_scatter, axes[:n_listeners])
 
 
+def itd_ild_scatter_evolution_gif(saving_manager, n_listeners, listener_labels=None, frame_stride=1, fps=16):
+
+    interaural_cues_series = saving_manager.saved_data["interaural_cues"]
+    if len(interaural_cues_series) <= 1:
+        return
+
+    sofaile = saving_manager.saved_data["sofaile"][0]
+    target_angle = saving_manager.saved_data["target_angle"][0]
+    gtfb = saving_manager.saved_data["gtfb"][0]
+    lag_values = saving_manager.saved_data["lag_values"][0]
+    tau_iacc = saving_manager.saved_data["tau_iacc"][0]
+
+    if listener_labels is None:
+        listener_labels = [f"VL {i}" for i in range(n_listeners)]
+
+    target_itd, target_ild = _compute_target_itd_ild(sofaile, target_angle, gtfb, lag_values, tau_iacc)
+    pair_indices = np.arange(target_itd.size)
+
+    if n_listeners == 1:
+        fig, axes = plt.subplots()
+        axes = [axes]
+    else:
+        n_cols = int(np.ceil(np.sqrt(n_listeners)))
+        n_rows = int(np.ceil(n_listeners / n_cols))
+        fig, axes_grid = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows), squeeze=False)
+        axes = axes_grid.ravel()
+        for j in range(n_listeners, len(axes)):
+            axes[j].axis('off')
+
+    estimated_scatters = []
+    for listener_idx in range(n_listeners):
+        ax = axes[listener_idx]
+        ax.scatter(
+            target_itd, target_ild,
+            c=pair_indices, cmap='viridis', marker='x', label='Target',
+        )
+        cues_itd, cues_ild = split_interaural_cues_by_listener(
+            interaural_cues_series[0]["itd"], interaural_cues_series[0]["ild"], n_listeners,
+        )[listener_idx]
+        estimated_scatter = ax.scatter(
+            cues_itd, cues_ild,
+            c=pair_indices, cmap='viridis', marker='o', label='Estimated',
+        )
+        ax.legend()
+        _style_itd_ild_axes(ax)
+        ax.set_title(f'{listener_labels[listener_idx]} — {target_angle}°')
+        estimated_scatters.append(estimated_scatter)
+
+    title = fig.suptitle(f'ITD-ILD Evolution — Epoch 0')
+    fig.tight_layout(rect=[0, 0, 0.95, 0.96])
+    _add_critical_band_colorbar(fig, estimated_scatters[0], axes[:n_listeners])
+
+    gif_path = saving_manager.output_dir / "plots" / "itd_ild_scatter_evolution.gif"
+    gif_path.parent.mkdir(exist_ok=True)
+
+    frame_indices = list(range(0, len(interaural_cues_series), frame_stride))
+    writer = animation.PillowWriter(fps=fps)
+    with writer.saving(fig, str(gif_path), dpi=120):
+        for epoch in frame_indices:
+            cues = interaural_cues_series[epoch]
+            for listener_idx, estimated_scatter in enumerate(estimated_scatters):
+                cues_itd, cues_ild = split_interaural_cues_by_listener(
+                    cues["itd"], cues["ild"], n_listeners,
+                )[listener_idx]
+                estimated_scatter.set_offsets(np.c_[cues_itd, cues_ild])
+            title.set_text(f'ITD-ILD Evolution — Epoch {epoch}')
+            writer.grab_frame()
+
+    plt.close(fig)

@@ -8,7 +8,6 @@ from utils.miscellaneous import ready_for_plotting
 from logger.saving import task_grad_pairwise_cosine_similarity_stats
 from plotting.XY_plots import (time_domain_filters_plot,
                      frequency_domain_filters_plot,
-                     cosine_similarity_over_epochs_plot,
                      grad_norms_over_epochs_plot,
                      filter_tap_branch_grad_norms_over_epochs_plot,
                      filter_tap_branch_cosine_similarity_over_epochs_plot,
@@ -16,7 +15,7 @@ from plotting.XY_plots import (time_domain_filters_plot,
                      loss_grad_norms_over_epochs_plot,
                      gradnorm_task_weights_over_epochs_plot,
                      task_grad_pairwise_cosine_similarity_plot)
-from plotting.scatter_plots import itd_ild_scatter_plot
+from plotting.scatter_plots import itd_ild_scatter_plot, itd_ild_scatter_evolution_gif
 from plotting.spatial_plots import localisation_arrows_plot
 
 
@@ -40,6 +39,8 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager):
         n_listeners=n_listeners, listener_labels=listener_labels,
     )
     saving_manager.save_new_plots("itd_ild_scatter")
+    if "interaural_cues" in saving_manager.saved_data and len(saving_manager.saved_data["interaural_cues"]) > 1:
+        itd_ild_scatter_evolution_gif(saving_manager, n_listeners=n_listeners, listener_labels=listener_labels)
     grad_norms_over_epochs_plot(saving_manager.saved_data["rectified_signals_grad_itd"], saving_manager.saved_data["rectified_signals_grad_ild"], "Grad Norms Plot")
     saving_manager.save_new_plots("rectified_signals_grad_norms")
     filter_tap_branch_grad_norms_over_epochs_plot(saving_manager.saved_data["grad_itd_on_taps_norm"], saving_manager.saved_data["grad_ild_on_taps_norm"])

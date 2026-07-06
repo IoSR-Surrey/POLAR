@@ -34,6 +34,7 @@ with open('config/hyperpameters.json', 'r') as f:
     config = json.load(f)
 use_gradnorm = config["training"]["use_gradnorm"]
 skip_keys = config["saving"]["skip_keys"]
+use_tensorboard = config["saving"]["use_tensorboard"]
     
 sofaile = load_sofa("data/SOFA/SYMMETRIC_D1_48K_24bit_256tap_FIR_SOFA.sofa")
 hrirs = get_template_for_llado2025_desena_2020(sofaile)
@@ -70,7 +71,8 @@ gradnorm = GradNorm(
     task_importance=[model["weight"] for model in modelTrainer.model_dict.values()],
 ) if use_gradnorm else None
 
-saving_manager = SavingManager()
+saving_manager = SavingManager("outputs/scratch", skip_keys=skip_keys, timestamp=True, use_tensorboard=use_tensorboard)
+
 saving_manager.save("gtfb", gtfb)
 saving_manager.save("lag_values", lag_values)
 saving_manager.save("tau_iacc", 1e-2)
@@ -83,6 +85,7 @@ saving_manager.save("sofaile", sofaile)
 dummy_input = torch.ones(1,1)
 for i in range(500):
 
+    saving_manager.set_step(i)
     spk_filters = nn(dummy_input)
 
     binaural_signals = prop(stim, spk_filters)
@@ -91,6 +94,8 @@ for i in range(500):
     loss_dict = modelTrainer.compute_loss(targets)
 
     optimizer.zero_grad()
+    cues = modelTrainer.kwargs_output["llado2025_grad_surgery"]["interauralcues"]
+    saving_manager.save("interaural_cues", {"itd": cues["itd"].detach(), "ild": cues["ild"].detach()})
     saving_manager.save("loss_dict", loss_dict)
     saving_manager.save("modelTrainer.estimates", modelTrainer.estimates)
     loss_grad_norms = extract_loss_grad_norms(loss_dict, nn)
@@ -108,6 +113,7 @@ for i in range(500):
         optimizer.step()
         saving_manager.save_effective_loss_grad_norms(loss_grad_norms, modelTrainer)
     
+    saving_manager.flush_tensorboard()
     print_loss_and_estimates(loss_dict, modelTrainer.estimates, i)
 
 with torch.no_grad():
@@ -124,7 +130,8 @@ saving_manager.save("localisation_angles", localisation_angles)
 saving_manager.save("localisation_uncertainty", localisation_uncertainty)
 saving_manager.save("spk_filters", spk_filters)
 
-run_dir = saving_manager.export_to_disk("outputs/scratch", skip_keys=skip_keys, timestamp=True)
-print(f"Saved outputs to {run_dir}")
+saving_manager.export_to_disk()
+print(f"Saved outputs to {saving_manager.output_dir}")
 
 ALL_PLOTTING_FUNCTIONS(saving_manager)
+saving_manager.close()
