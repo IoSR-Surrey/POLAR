@@ -225,7 +225,8 @@ def task_grad_pairwise_cosine_similarity_plot(task_names, mean_matrix, pairwise_
     axes[1].set_xlabel("Epoch")
     axes[1].set_ylabel("Cosine Similarity")
     axes[1].set_title(f"Pairwise task grad cosine similarity over epochs for {title}")
-    axes[1].legend()
+    if pairwise_labels:
+        axes[1].legend()
     axes[1].grid(True)
 
     for name in task_names:
