@@ -1,18 +1,83 @@
 
+import json
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import webbrowser
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import torch
+from utils.dsp import cosine_similarity
+from models.listener_based.llado2025.grad_surgery import ItdIldDBranchGradNormFn
+
+
+_TENSORBOARD_SKIP_KEYS = {
+    "sofaile", "gtfb", "lag_values", "binaural_signals", "spk_filters",
+    "grad_itd_on_taps", "grad_ild_on_taps", "loss_grad_vectors",
+    "rectified_signals_grad_itd", "rectified_signals_grad_ild",
+    "grad_itd_on_taps_norm", "grad_ild_on_taps_norm", "grad_itd_on_taps_norm_ratio",
+    "lstn_pos", "spk_pos", "target_angle", "tau_iacc", "interaural_cues"
+}
 
 
 class SavingManager:
 
-    def __init__(self):
+    def __init__(self, output_dir=None, skip_keys=None, timestamp=False, use_tensorboard=False):
         
         self.saved_data = {}
         self.output_dir = None
+        self._seen_fignums = set()
+        self._writer = None
+        self._tensorboard_proc = None
+        self._tensorboard_url = None
+        self._step = None
+        self._skip_keys = set(skip_keys) if skip_keys is not None else {"sofaile"}
+        self._tensorboard_skip_keys = self._skip_keys | _TENSORBOARD_SKIP_KEYS
+
+        if output_dir is not None:
+            self._setup_output_dir(output_dir, timestamp=timestamp)
+            if use_tensorboard:
+                from torch.utils.tensorboard import SummaryWriter
+                logdir = self.output_dir / "tensorboard"
+                self._writer = SummaryWriter(logdir)
+                self._tensorboard_proc, self._tensorboard_url = _launch_tensorboard(logdir)
+                print(f"TensorBoard running at {self._tensorboard_url}")
+
+    def set_step(self, step):
+        self._step = step
+
+    def _setup_output_dir(self, output_dir, timestamp=False, skip_keys=None):
+        output_dir = Path(output_dir)
+        if timestamp:
+            output_dir = output_dir / datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "npy").mkdir(exist_ok=True)
+        (output_dir / "json").mkdir(exist_ok=True)
+        self.output_dir = output_dir
+        if skip_keys is not None:
+            self._skip_keys = set(skip_keys)
+            self._tensorboard_skip_keys = self._skip_keys | _TENSORBOARD_SKIP_KEYS
         self._seen_fignums = set()
 
     def save(self, key, value):
         if key not in self.saved_data:
             self.saved_data[key] = []
         self.saved_data[key].append(value)
+        if self._writer is not None and key not in self._tensorboard_skip_keys:
+            step = self._step if self._step is not None else len(self.saved_data[key]) - 1
+            try:
+                _log_to_tensorboard(self._writer, key, value, step)
+            except (TypeError, ValueError):
+                pass
+
+    def flush_tensorboard(self):
+        if self._writer is not None:
+            self._writer.flush()
 
     def save_branch_grads(self, model_trainer):
         rectified_signals_grad_itd, rectified_signals_grad_ild = extract_branch_grads(model_trainer)
@@ -36,36 +101,33 @@ class SavingManager:
     def save_loss_grad_vectors(self, loss_dict, filter_module):
         self.save("loss_grad_vectors", extract_loss_grad_vectors(loss_dict, filter_module))
 
-    def export_to_disk(self, output_dir, skip_keys=None, timestamp=False):
+    def export_to_disk(self, output_dir=None, skip_keys=None, timestamp=False):
         """Write saved_data to output_dir as .npy and .json files."""
-        from datetime import datetime
-        from pathlib import Path
-        import json
-
-        output_dir = Path(output_dir)
-        if timestamp:
-            output_dir = output_dir / datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "npy").mkdir(exist_ok=True)
-        (output_dir / "json").mkdir(exist_ok=True)
-        skip_keys = set(skip_keys) if skip_keys is not None else {"sofaile"}
+        if self.output_dir is None:
+            self._setup_output_dir(output_dir, timestamp=timestamp, skip_keys=skip_keys)
 
         manifest = {}
         for key, values in self.saved_data.items():
-            if key in skip_keys:
+            if key in self._skip_keys:
                 manifest[key] = {"skipped": True, "reason": "in skip_keys"}
                 continue
             try:
-                manifest[key] = _export_saved_values(key, values, output_dir)
+                manifest[key] = _export_saved_values(key, values, self.output_dir)
             except Exception as exc:
                 manifest[key] = {"skipped": True, "reason": str(exc)}
 
-        with open(output_dir / "manifest.json", "w", encoding="utf-8") as f:
+        with open(self.output_dir / "manifest.json", "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
 
-        self.output_dir = output_dir
-        self._seen_fignums = set()
-        return output_dir
+        return self.output_dir
+
+    def close(self):
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
+        if self._tensorboard_proc is not None:
+            self._tensorboard_proc.terminate()
+            self._tensorboard_proc = None
 
     def save_new_plots(self, basename, names=None):
         import matplotlib.pyplot as plt
@@ -85,7 +147,10 @@ class SavingManager:
                 filename = basename
             else:
                 filename = f"{basename}_{i}"
-            plt.figure(fig_num).savefig(plot_dir / f"{filename}.png", bbox_inches="tight", dpi=150)
+            fig = plt.figure(fig_num)
+            fig.savefig(plot_dir / f"{filename}.png", bbox_inches="tight", dpi=150)
+            if self._writer is not None:
+                self._writer.add_figure(f"plots/{filename}", fig, global_step=0)
 
         self._seen_fignums |= set(new_fignums)
 
@@ -94,14 +159,6 @@ class SavingManager:
                                                     # EXTRA/HELPER FUNCTIONS #
 ############################################################################################################################################################
 ############################################################################################################################################################
-
-import json
-from pathlib import Path
-
-import numpy as np
-import torch
-from utils.dsp import cosine_similarity
-from models.listener_based.llado2025.grad_surgery import ItdIldDBranchGradNormFn
 
 
 def _to_numpy(value):
@@ -129,6 +186,20 @@ def _is_scalar_like(value):
     if isinstance(value, np.ndarray):
         return value.ndim == 0
     return False
+
+
+def _log_to_tensorboard(writer, tag, value, step):
+    value = _to_numpy(value)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _log_to_tensorboard(writer, f"{tag}/{key}", item, step)
+        return
+    if _is_scalar_like(value):
+        writer.add_scalar(tag, value.item() if isinstance(value, np.ndarray) else value, step)
+        return
+    if isinstance(value, np.ndarray) and value.size <= 16:
+        for i, item in enumerate(value.reshape(-1)):
+            writer.add_scalar(f"{tag}/{i}", item, step)
 
 
 def _json_ready(value):
@@ -367,3 +438,43 @@ def task_grad_pairwise_cosine_similarity_stats(loss_grad_vectors):
         "pairwise_over_epochs": pairwise_over_epochs,
         "ref_cosines_over_epochs": ref_cosines_over_epochs,
     }
+
+
+def _find_free_port(start=6006):
+    for port in range(start, start + 20):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    return start
+
+
+def _wait_for_tensorboard(url, timeout=30):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            urllib.request.urlopen(url, timeout=1)
+            return True
+        except (urllib.error.URLError, TimeoutError):
+            time.sleep(0.5)
+    return False
+
+
+def _launch_tensorboard(logdir):
+    port = _find_free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "tensorboard.main", f"--logdir={logdir}", f"--port={port}", "--reload_interval=5"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    )
+    url = f"http://localhost:{port}"
+    if not _wait_for_tensorboard(url):
+        err = proc.stderr.read().decode(errors="replace")
+        proc.terminate()
+        hint = " Try: pip install 'setuptools>=65,<82'" if "pkg_resources" in err else ""
+        raise RuntimeError(f"TensorBoard failed to start on {url}: {err}{hint}")
+    webbrowser.open(url)
+    return proc, url
