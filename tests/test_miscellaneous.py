@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 import torch
 
-from utils.miscellaneous import _flatten_tap_grads, load_npy_to_torch, ready_for_plotting
+from utils.miscellaneous import _flatten_tap_grads, load_npy_to_torch, ready_for_plotting, target_angle_for_listeners
 
 
 def test_load_npy_to_torch_round_trip() -> None:
@@ -58,3 +58,23 @@ def test_flatten_tap_grads_concatenates_non_none_gradients() -> None:
 
     assert flat is not None
     assert flat.tolist() == [1.0, 2.0, 3.0]
+
+
+def test_target_angle_for_listeners_from_target_position():
+    lstn = torch.tensor([[0.0, 0.0], [0.0, 0.25], [0.0, -0.25]])
+    target_pos = torch.tensor([2.0, 0.0])
+    angles = target_angle_for_listeners(lstn, target_pos)
+
+    assert angles.shape == (3,)
+    assert angles[0].item() == pytest.approx(0.0)
+    assert angles[1].item() == pytest.approx(-7.125, abs=0.01)
+    assert angles[2].item() == pytest.approx(7.125, abs=0.01)
+
+
+def test_target_angle_for_listeners_matches_propagation_helper():
+    from propagation.helpers import _calculate_source_angle_2D
+
+    lstn = torch.tensor([[0.0, 0.0], [0.0, 1.0]])
+    target_pos = torch.tensor([2.0 * torch.cos(torch.deg2rad(torch.tensor(30.0))), 2.0 * torch.sin(torch.deg2rad(torch.tensor(30.0)))])
+    expected = _calculate_source_angle_2D(lstn, target_pos.unsqueeze(0)).squeeze(0)
+    assert torch.allclose(target_angle_for_listeners(lstn, target_pos), expected)

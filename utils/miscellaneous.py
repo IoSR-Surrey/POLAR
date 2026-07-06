@@ -15,6 +15,11 @@ def ready_for_plotting(tensor):
     else:
         raise ValueError(f"Unsupported type: {type(tensor)}")
 
+def target_angle_for_listeners(lstn_pos, target_pos):
+    """Azimuth (degrees) of target_pos as seen from each listener."""
+    target_pos = torch.as_tensor(target_pos, device=lstn_pos.device, dtype=lstn_pos.dtype)
+    source_vec = target_pos - lstn_pos
+    return torch.rad2deg(torch.atan2(source_vec[..., 1], source_vec[..., 0]))
 
     
 def _flatten_tap_grads(grad_on_taps):
