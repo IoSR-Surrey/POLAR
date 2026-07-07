@@ -71,6 +71,7 @@ class GradNorm:
 
         gradnorm_loss = (importance * (grad_norms - target_grad_norms).abs()).sum() / importance.sum()
 
+        old_weights = self.weights.detach().clone()
         self.weight_optimizer.zero_grad()
         gradnorm_loss.backward(retain_graph=True)
         self.weight_optimizer.step()
@@ -81,8 +82,11 @@ class GradNorm:
         total_loss.backward()
         model_optimizer.step()
 
+        effective_grad_norm = torch.norm(self.weights * grad_norms/old_weights)
+
         return {
             "grad_norms": grad_norms.detach(),
+            "effective_grad_norm": effective_grad_norm.detach(),
             "task_weights": self.weights.detach().clone(),
             "weighted_total": total_loss.detach(),
         }
