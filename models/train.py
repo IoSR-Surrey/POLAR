@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
-import numpy as np 
 
 def create_model_dict(models, criterions = None, weights=None):
 
@@ -24,7 +23,7 @@ class ModelTrainer:
     def __init__(self, models, criterions = None, weights=None):
         self.model_dict = create_model_dict(models, criterions, weights)
 
-    def compute_estimates(self, binaural_signals, spk_filters, listener_idx):
+    def compute_estimates(self, binaural_signals, spk_filters):
 
         N_signals = binaural_signals.shape[0]
         N_listeners = binaural_signals.shape[1]
@@ -55,7 +54,7 @@ class ModelTrainer:
         total_loss = 0
         for model_name, model in self.model_dict.items():
             self.loss_dict[model_name] = model['criterion'](self.estimates[model_name], targets[model_name]) * model['weight']
-            total_loss += self.loss_dict[model_name]*model['weight']
+            total_loss += self.loss_dict[model_name]
         self.loss_dict['total'] = total_loss
         return self.loss_dict
 

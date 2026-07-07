@@ -55,7 +55,7 @@ def test_model_trainer_compute_estimates() -> None:
     binaural = torch.ones(2, 1, 2, 8)
     spk_filters = torch.ones(1, 2, 32)
 
-    trainer.compute_estimates(binaural, spk_filters, listener_idx=0)
+    trainer.compute_estimates(binaural, spk_filters)
 
     assert trainer.estimates["_MockListenerModel"].shape == (2, 1)
     assert trainer.estimates["_MockListenerModel"][0, 0].item() == pytest.approx(3.0)
@@ -66,10 +66,10 @@ def test_model_trainer_compute_loss_applies_weights() -> None:
     trainer = ModelTrainer([_MockListenerModel(2.0)], weights=[2.0])
     binaural = torch.ones(1, 1, 2, 8)
     spk_filters = torch.ones(1, 2, 32)
-    trainer.compute_estimates(binaural, spk_filters, listener_idx=0)
+    trainer.compute_estimates(binaural, spk_filters)
 
     loss_dict = trainer.compute_loss({"_MockListenerModel": torch.tensor([[0.0]])})
 
     per_model_loss = F.mse_loss(torch.tensor([[2.0]]), torch.tensor([[0.0]]))
     assert loss_dict["_MockListenerModel"].item() == pytest.approx(per_model_loss * 2.0)
-    assert loss_dict["total"].item() == pytest.approx(per_model_loss * 4.0)
+    assert loss_dict["total"].item() == pytest.approx(per_model_loss * 2.0)

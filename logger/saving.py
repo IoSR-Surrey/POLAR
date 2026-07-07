@@ -18,7 +18,7 @@ from models.listener_based.llado2025.grad_surgery import ItdIldDBranchGradNormFn
 
 _TENSORBOARD_SKIP_KEYS = {
     "sofaile", "gtfb", "lag_values", "binaural_signals", "spk_filters",
-    "grad_itd_on_taps", "grad_ild_on_taps", "loss_grad_vectors",
+    "grad_itd_on_taps", "grad_ild_on_taps", "loss_grad_vectors", "effective_loss_grad_vectors", "combined_grad_vector",
     "rectified_signals_grad_itd", "rectified_signals_grad_ild",
     "grad_itd_on_taps_norm", "grad_ild_on_taps_norm", "grad_itd_on_taps_norm_ratio",
     "lstn_pos", "spk_pos", "target_angle", "tau_iacc", "interaural_cues"
@@ -72,35 +72,13 @@ class SavingManager:
         if self._writer is not None and key not in self._tensorboard_skip_keys:
             step = self._step if self._step is not None else len(self.saved_data[key]) - 1
             try:
-                _log_to_tensorboard(self._writer, key, value, step)
+                _log_to_tensorboard(self._writer, key, _tensorboard_value(key, value, self._task_names), step)
             except (TypeError, ValueError):
                 pass
 
     def flush_tensorboard(self):
         if self._writer is not None:
             self._writer.flush()
-
-    def save_branch_grads(self, model_trainer):
-        rectified_signals_grad_itd, rectified_signals_grad_ild = extract_branch_grads(model_trainer)
-        self.save("rectified_signals_grad_itd", rectified_signals_grad_itd)
-        self.save("rectified_signals_grad_ild", rectified_signals_grad_ild)
-
-    def save_filter_tap_branch_grads(self, model_trainer, filter_module):
-        grad_itd_on_taps, grad_ild_on_taps = extract_filter_tap_branch_grads(model_trainer, filter_module)
-        self.save("grad_itd_on_taps", grad_itd_on_taps)
-        self.save("grad_ild_on_taps", grad_ild_on_taps)
-
-        grad_itd_on_taps_norm, grad_ild_on_taps_norm, grad_itd_on_taps_norm_ratio = filter_tap_branch_grad_norms(grad_itd_on_taps, grad_ild_on_taps)
-        self.save("grad_itd_on_taps_norm", grad_itd_on_taps_norm)
-        self.save("grad_ild_on_taps_norm", grad_ild_on_taps_norm)
-        self.save("grad_itd_on_taps_norm_ratio", grad_itd_on_taps_norm_ratio)
-
-    def save_effective_loss_grad_norms(self, loss_grad_norms, model_trainer, gradnorm_task_weights=None):
-        effective_loss_grad_norms = to_effective_loss_grad_norms(loss_grad_norms, model_trainer, gradnorm_task_weights)
-        self.save("effective_grad_norms", effective_loss_grad_norms)
-
-    def save_loss_grad_vectors(self, loss_dict, filter_module):
-        self.save("loss_grad_vectors", extract_loss_grad_vectors(loss_dict, filter_module))
 
     def export_to_disk(self, output_dir=None, skip_keys=None, timestamp=False):
         """Write saved_data to output_dir as .npy and .json files."""
@@ -200,7 +178,7 @@ def _is_scalar_like(value):
 
 
 def _tensorboard_value(key, value, task_names):
-    if task_names is not None and key in ("gradnorm_task_weights", "gradnorm_grad_norms"):
+    if task_names is not None and key in ("gradnorm_task_weights", "gradnorm_grad_norms", "cagrad_task_coeffs", "cagrad_dual_weights", "cagrad_grad_norms"):
         array = np.asarray(_to_numpy(value)).reshape(-1)
         return {name: float(v) for name, v in zip(task_names, array)}
     return value
@@ -339,17 +317,6 @@ def _populate_llado_branch_grads(model_trainer):
     torch.autograd.grad(llado_loss, cues["rectified_signals"], retain_graph=True)
 
 
-def extract_branch_grads(model_trainer):
-
-    if "llado2025_grad_surgery" in model_trainer.model_dict:
-        _populate_llado_branch_grads(model_trainer)
-        rectified_signals_grad_itd = ItdIldDBranchGradNormFn.last_itd_grad
-        rectified_signals_grad_ild = ItdIldDBranchGradNormFn.last_ild_grad
-
-        return rectified_signals_grad_itd, rectified_signals_grad_ild
-
-
-
 def extract_filter_tap_branch_grads(model_trainer, filter_module):
     """
     Llado ITD / ILD branch contributions to FIR filter taps.
@@ -392,57 +359,35 @@ def extract_filter_tap_branch_grads(model_trainer, filter_module):
                 grad_itd_on_taps.append(g_llado.detach().clone() - g_ild.detach())
     return grad_itd_on_taps, grad_ild_on_taps
 
-def filter_tap_branch_grad_norms(grad_itd_on_taps, grad_ild_on_taps):
-    norm_itd = torch.norm(torch.cat([g.flatten() for g in grad_itd_on_taps if g is not None]))
-    norm_ild = torch.norm(torch.cat([g.flatten() for g in grad_ild_on_taps if g is not None]))
-    return norm_itd, norm_ild, norm_itd / (norm_itd + norm_ild + 1e-12)
-
-def extract_loss_grad_norms(loss_dict, filter_module):
-    filter_params = list(filter_module.parameters())
-    loss_grad_norms = {}
-    for key, loss in loss_dict.items():
-        if key == "total":
-            continue
-        grads = torch.autograd.grad(loss, filter_params, retain_graph=True, allow_unused=True)
-        flat_grads = [g.reshape(-1) for g in grads if g is not None]
-        if not flat_grads:
-            loss_grad_norms[key] = torch.zeros((), device=loss.device, dtype=loss.dtype)
-        else:
-            loss_grad_norms[key] = torch.norm(torch.cat(flat_grads)).detach()
-    return loss_grad_norms
-
-def extract_loss_grad_vectors(loss_dict, filter_module):
+def extract_loss_grad_and_norms(loss_dict, filter_module):
     filter_params = list(filter_module.parameters())
     loss_grad_vectors = {}
+    loss_grad_norms = {}
     for key, loss in loss_dict.items():
-        if key == "total":
-            continue
         grads = torch.autograd.grad(loss, filter_params, retain_graph=True, allow_unused=True)
         flat_grads = [g.reshape(-1) for g in grads if g is not None]
         if not flat_grads:
             loss_grad_vectors[key] = None
+            loss_grad_norms[key] = torch.zeros((), device=loss.device, dtype=loss.dtype)
         else:
             loss_grad_vectors[key] = torch.cat(flat_grads).detach()
-    return loss_grad_vectors
+            loss_grad_norms[key] = torch.norm(loss_grad_vectors[key]).detach()
+    return loss_grad_vectors, loss_grad_norms
 
-def to_effective_loss_grad_norms(loss_grad_norms, model_trainer, gradnorm_task_weights=None):
-    effective = {}
-    for i, name in enumerate(model_trainer.model_dict):
-        scale = gradnorm_task_weights[i] if gradnorm_task_weights is not None else model_trainer.model_dict[name]["weight"]
-        effective[name] = loss_grad_norms[name] * scale
-    return effective
-
-def task_grad_pairwise_cosine_similarity_stats(loss_grad_vectors):
+def task_grad_pairwise_cosine_similarity_stats(loss_grad_vectors, combined_grad_vectors=None):
     n_epochs = len(loss_grad_vectors)
     task_names = list(loss_grad_vectors[0].keys())
     n_tasks = len(task_names)
+    use_combined_reference = combined_grad_vectors is not None
 
-    g0 = loss_grad_vectors[0][task_names[0]]
-    ref = torch.zeros(g0.numel(), device=g0.device, dtype=g0.dtype)
-    ref[0] = 1.0
+    if not use_combined_reference:
+        g0 = loss_grad_vectors[0][task_names[0]]
+        ref = torch.zeros(g0.numel(), device=g0.device, dtype=g0.dtype)
+        ref[0] = 1.0
 
     matrices = []
     ref_cosines_over_epochs = {name: [] for name in task_names}
+    combined_norm_over_epochs = [] if use_combined_reference else None
     for epoch in range(n_epochs):
         mat = np.eye(n_tasks)
         for i in range(n_tasks):
@@ -456,12 +401,24 @@ def task_grad_pairwise_cosine_similarity_stats(loss_grad_vectors):
                 mat[i, j] = cos
                 mat[j, i] = cos
         matrices.append(mat)
-        for name in task_names:
-            g = loss_grad_vectors[epoch][name]
-            if g is None:
-                ref_cosines_over_epochs[name].append(float("nan"))
-            else:
-                ref_cosines_over_epochs[name].append(float(cosine_similarity(g, ref)))
+        if use_combined_reference:
+            g_combined = combined_grad_vectors[epoch]
+            combined_norm_over_epochs.append(
+                float(torch.norm(g_combined)) if g_combined is not None else float("nan")
+            )
+            for name in task_names:
+                g = loss_grad_vectors[epoch][name]
+                if g is None or g_combined is None:
+                    ref_cosines_over_epochs[name].append(float("nan"))
+                else:
+                    ref_cosines_over_epochs[name].append(float(cosine_similarity(g, g_combined)))
+        else:
+            for name in task_names:
+                g = loss_grad_vectors[epoch][name]
+                if g is None:
+                    ref_cosines_over_epochs[name].append(float("nan"))
+                else:
+                    ref_cosines_over_epochs[name].append(float(cosine_similarity(g, ref)))
 
     matrices = np.asarray(matrices)
     pairwise_labels = []
@@ -471,13 +428,17 @@ def task_grad_pairwise_cosine_similarity_stats(loss_grad_vectors):
             pairwise_labels.append(f"{task_names[i]} vs {task_names[j]}")
             pairwise_over_epochs.append(matrices[:, i, j])
 
-    return {
+    stats = {
         "task_names": task_names,
         "mean_matrix": np.nanmean(matrices, axis=0),
         "pairwise_labels": pairwise_labels,
         "pairwise_over_epochs": pairwise_over_epochs,
         "ref_cosines_over_epochs": ref_cosines_over_epochs,
+        "use_combined_reference": use_combined_reference,
     }
+    if use_combined_reference:
+        stats["combined_norm_over_epochs"] = combined_norm_over_epochs
+    return stats
 
 
 def _find_free_port(start=6006):

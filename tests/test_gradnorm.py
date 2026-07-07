@@ -60,16 +60,17 @@ def _unweighted_grad_norm_ratio(loss_dict, task_names, shared_params) -> float:
         norms.append(torch.norm(torch.cat([g.reshape(-1) for g in grads if g is not None])))
     return (norms[1] / norms[0]).item()
 
-
-def test_gradnorm_single_task_matches_plain_backward() -> None:
+@pytest.mark.parametrize("alpha", [0.5, 1.0, 1.5])
+@pytest.mark.parametrize("lr", [0.01, 0.025, 0.05])
+def test_gradnorm_single_task_matches_plain_backward(alpha: float, lr: float) -> None:
     torch.manual_seed(0)
     net_plain = _SingleTaskNet()
     net_gradnorm = _SingleTaskNet()
     net_gradnorm.load_state_dict(net_plain.state_dict())
 
-    optimizer_plain = torch.optim.SGD(net_plain.parameters(), lr=0.1)
-    optimizer_gradnorm = torch.optim.SGD(net_gradnorm.parameters(), lr=0.1)
-    gradnorm = GradNorm(["task"], alpha=1.5, lr=0.1)
+    optimizer_plain = torch.optim.SGD(net_plain.parameters(), lr=lr)
+    optimizer_gradnorm = torch.optim.SGD(net_gradnorm.parameters(), lr=lr)
+    gradnorm = GradNorm(["task"], alpha=alpha, lr=0.1)
 
     for _ in range(20):
         loss_dict_plain = net_plain.loss_dict()

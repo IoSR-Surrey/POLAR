@@ -1,19 +1,18 @@
-
+import json
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 
-from utils.miscellaneous import ready_for_plotting
+from utils.miscellaneous import ready_for_plotting, target_angle_for_listeners
 from logger.saving import task_grad_pairwise_cosine_similarity_stats
 from plotting.XY_plots import (time_domain_filters_plot,
                      frequency_domain_filters_plot,
-                     grad_norms_over_epochs_plot,
-                     filter_tap_branch_grad_norms_over_epochs_plot,
-                     filter_tap_branch_cosine_similarity_over_epochs_plot,
+                     raw_grad_cosine_to_reference_plot,
                      plot_loss_and_estimates,
                      loss_grad_norms_over_epochs_plot,
                      gradnorm_task_weights_over_epochs_plot,
+                     cagrad_task_coeffs_over_epochs_plot,
                      task_grad_pairwise_cosine_similarity_plot)
 from plotting.scatter_plots import itd_ild_scatter_plot, itd_ild_scatter_evolution_gif
 from plotting.spatial_plots import localisation_arrows_plot
@@ -21,23 +20,31 @@ from plotting.spatial_plots import localisation_arrows_plot
 
 def ALL_PLOTTING_FUNCTIONS(saving_manager):
 
+    with open("config/hyperpameters.json", "r") as f:
+        config = json.load(f)
+        fs = config["env"]["fs"]
+
     n_listeners, listener_labels = get_listener_plot_info(saving_manager)
 
     if "spk_filters" in saving_manager.saved_data:
         spk_filters = saving_manager.saved_data["spk_filters"][0]
-        time_domain_filters_plot(spk_filters)
+        time_domain_filters_plot(spk_filters, fs=fs)
         saving_manager.save_new_plots("time_domain_filters")
-        frequency_domain_filters_plot(spk_filters)
+        frequency_domain_filters_plot(spk_filters, fs=fs)
         saving_manager.save_new_plots("frequency_domain_filters")
     
     if "interaural_cues" in saving_manager.saved_data:
+        final_cues = saving_manager.saved_data["interaural_cues"][-1]
         itd_ild_scatter_plot(
-            saving_manager.saved_data["binaural_signals"][0],
+            final_cues["itd"],
+            final_cues["ild"],
             saving_manager.saved_data["sofaile"][0],
             saving_manager.saved_data["target_angle"][0],
             saving_manager.saved_data["gtfb"][0],
             saving_manager.saved_data["lag_values"][0],
             saving_manager.saved_data["tau_iacc"][0],
+            n_listeners=n_listeners,
+            listener_labels=listener_labels,
         )
         saving_manager.save_new_plots("itd_ild_scatter")
         if len(saving_manager.saved_data["interaural_cues"]) > 1:
@@ -58,24 +65,87 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager):
             loss_names.append("loss_and_estimates_total")
         saving_manager.save_new_plots("loss_and_estimates", names=loss_names)
 
-    if "loss_grad_vectors" in saving_manager.saved_data:
+    # Which MTL diagnostics to plot is inferred from the saved keys (the run's
+    # optimizer), not re-read from config: GradNorm saves per-task "effective_grads"
+    # (dict per epoch); CAGrad saves a single combined "effective_grad" per epoch.
+    if "raw_grads" in saving_manager.saved_data and "effective_grads" in saving_manager.saved_data:
+        task_names = list(saving_manager.saved_data["raw_grads"][0].keys())
+        raw_grad_norms = [
+            {key: torch.norm(epoch_grads[key]) for key in epoch_grads}
+            for epoch_grads in saving_manager.saved_data["raw_grads"]
+        ]
+        effective_grad_norms = [
+            {key: torch.norm(epoch_grads[key]) for key in epoch_grads}
+            for epoch_grads in saving_manager.saved_data["effective_grads"]
+        ]
+        loss_grad_norms_over_epochs_plot(raw_grad_norms, "Raw Loss Grad Norms", norm_kind="Raw")
+        saving_manager.save_new_plots("raw_grad_norms")
+        loss_grad_norms_over_epochs_plot(effective_grad_norms, "Effective Loss Grad Norms", norm_kind="Effective")
+        saving_manager.save_new_plots("effective_grad_norms")
+
+        if "gradnorm_task_weights" in saving_manager.saved_data:
+            gradnorm_task_weights_over_epochs_plot(
+                saving_manager.saved_data["gradnorm_task_weights"], task_names, "GradNorm"
+            )
+            saving_manager.save_new_plots("gradnorm_task_weights")
+
         task_grad_pairwise_cosine_similarity_plot(
-            **task_grad_pairwise_cosine_similarity_stats(saving_manager.saved_data["loss_grad_vectors"]),
+            **task_grad_pairwise_cosine_similarity_stats(saving_manager.saved_data["effective_grads"]),
             title="Task Gradients on Filter Taps",
+            pairwise_only=True,
         )
         saving_manager.save_new_plots("task_grad_pairwise_cosine_similarity")
 
-    if "loss_grad_norms" in saving_manager.saved_data:
-        loss_grad_norms_over_epochs_plot(saving_manager.saved_data["loss_grad_norms"], "Effective Loss Grad Norms")
-        saving_manager.save_new_plots("loss_grad_norms")
-    if "gradnorm_task_weights" in saving_manager.saved_data:
-        task_names = [key for key in saving_manager.saved_data["loss_dict"][0].keys() if key != "total"]
-        gradnorm_task_weights_over_epochs_plot(saving_manager.saved_data["gradnorm_task_weights"], task_names, "GradNorm Task Weights")
-        saving_manager.save_new_plots("gradnorm_task_weights")
+    if "raw_grads" in saving_manager.saved_data and "effective_grad" in saving_manager.saved_data:
+        task_names = list(saving_manager.saved_data["raw_grads"][0].keys())
+        raw_grad_norms = [
+            {key: torch.norm(epoch_grads[key]) for key in epoch_grads}
+            for epoch_grads in saving_manager.saved_data["raw_grads"]
+        ]
+        loss_grad_norms_over_epochs_plot(raw_grad_norms, "Raw Loss Grad Norms", norm_kind="Raw")
+        saving_manager.save_new_plots("raw_grad_norms")
+
+        if "cagrad_task_coeffs" in saving_manager.saved_data:
+            extra_series = None
+            if "cagrad_dual_weights" in saving_manager.saved_data:
+                dual_weights = np.asarray(ready_for_plotting(saving_manager.saved_data["cagrad_dual_weights"]))
+                extra_series = {f"{name} dual weight": dual_weights[..., i] for i, name in enumerate(task_names)}
+            cagrad_task_coeffs_over_epochs_plot(
+                saving_manager.saved_data["cagrad_task_coeffs"], task_names,
+                "CAGrad task coefficients", extra_series=extra_series,
+            )
+            saving_manager.save_new_plots("cagrad_task_coeffs")
+
+        # "Plain" optimisation direction: the summed raw gradient (grad of the total
+        # loss), i.e. what a vanilla backward pass would step along.
+        summed_raw_grad = [
+            torch.stack([epoch_grads[key] for key in epoch_grads]).sum(dim=0)
+            for epoch_grads in saving_manager.saved_data["raw_grads"]
+        ]
+        # How each task's raw gradient aligns with the plain (summed) direction.
+        raw_grad_cosine_to_reference_plot(
+            saving_manager.saved_data["raw_grads"], summed_raw_grad, task_names,
+            "Raw grads vs summed (plain) gradient",
+        )
+        saving_manager.save_new_plots("raw_vs_plain_cosine_similarity")
+        # How each task's raw gradient aligns with the CAGrad combined direction.
+        raw_grad_cosine_to_reference_plot(
+            saving_manager.saved_data["raw_grads"], saving_manager.saved_data["effective_grad"], task_names,
+            "Raw grads vs CAGrad combined gradient",
+        )
+        saving_manager.save_new_plots("raw_vs_cagrad_cosine_similarity")
+
+
     if all(key in saving_manager.saved_data for key in ("lstn_pos", "spk_pos", "localisation_angles", "localisation_uncertainty")):
-        target_angle = saving_manager.saved_data["target_angle"][0]
+        lstn_pos = saving_manager.saved_data["lstn_pos"][0]
+        if "target_position" in saving_manager.saved_data:
+            target_angle = ready_for_plotting(
+                target_angle_for_listeners(lstn_pos, saving_manager.saved_data["target_position"][0])
+            )
+        else:
+            target_angle = saving_manager.saved_data["target_angle"][0]
         localisation_arrows_plot(
-            saving_manager.saved_data["lstn_pos"][0],
+            lstn_pos,
             saving_manager.saved_data["spk_pos"][0],
             saving_manager.saved_data["localisation_angles"][0],
             saving_manager.saved_data["localisation_uncertainty"][0],

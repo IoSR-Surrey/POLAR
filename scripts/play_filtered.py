@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
 import numpy as np
+import pygame
 import sounddevice as sd
 import torch
 import torchaudio.functional as TF
@@ -122,13 +123,94 @@ def save_wav(path, audio, fs):
     wavfile.write(path, fs, normalize_for_playback(audio))
 
 
-def play_audio(audio, fs, device_index):
+class LoopPlayer:
+    def __init__(self, audio, fs, device_index):
+        self.audio = audio
+        self.fs = fs
+        self.device_index = device_index
+        self.playing = False
+        self.position = 0
+        self.stream = None
+
+    def _callback(self, outdata, frames, time, status):
+        if status:
+            print(status, file=sys.stderr)
+        if not self.playing:
+            outdata.fill(0)
+            return
+
+        n_samples = len(self.audio)
+        pos = self.position
+        for i in range(frames):
+            outdata[i] = self.audio[pos]
+            pos += 1
+            if pos >= n_samples:
+                pos = 0
+        self.position = pos
+
+    def start(self):
+        devices = sd.query_devices()
+        sd.default.device = (None, self.device_index)
+        print(f"Using output device {self.device_index}: {devices[self.device_index]['name']}")
+        self.stream = sd.OutputStream(
+            samplerate=self.fs,
+            channels=self.audio.shape[1],
+            dtype="float32",
+            callback=self._callback,
+            device=(None, self.device_index),
+        )
+        self.stream.start()
+
+    def stop(self):
+        if self.stream is not None:
+            self.stream.stop()
+            self.stream.close()
+            self.stream = None
+        sd.stop()
+
+    def toggle(self):
+        self.playing = not self.playing
+
+
+def run_playback_loop(audio, fs, device_index):
     devices = sd.query_devices()
-    sd.default.device = (None, device_index)
-    print(f"Using output device {device_index}: {devices[device_index]['name']}")
-    playback_audio = normalize_for_playback(audio)
-    sd.play(playback_audio, fs, device=(None, device_index), blocking=True)
-    sd.wait()
+    device_name = devices[device_index]["name"]
+
+    pygame.init()
+    screen = pygame.display.set_mode((640, 200))
+    pygame.display.set_caption("Filtered pink-noise burst")
+    font = pygame.font.SysFont(None, 28)
+
+    player = LoopPlayer(normalize_for_playback(audio), fs, device_index)
+    player.start()
+    n_channels = player.audio.shape[1]
+
+    running = True
+    clock = pygame.time.Clock()
+    while running:
+        screen.fill((25, 25, 25))
+        status = "Playing — Space to pause" if player.playing else "Paused — Space to play"
+        for i, line in enumerate([
+            status,
+            f"Device {device_index}: {device_name}",
+            f"{n_channels} channels   ESC to quit",
+        ]):
+            screen.blit(font.render(line, True, (220, 220, 220)), (20, 24 + 36 * i))
+        pygame.display.flip()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    running = False
+                elif event.key == pygame.K_SPACE and not getattr(event, "repeat", 0):
+                    player.toggle()
+
+        clock.tick(30)
+
+    player.stop()
+    pygame.quit()
 
 
 def parse_args():
@@ -174,7 +256,7 @@ def main():
         return
 
     output_device = select_output_device(n_sources, args.device)
-    play_audio(filtered_audio, args.fs, output_device)
+    run_playback_loop(filtered_audio, args.fs, output_device)
 
 
 if __name__ == "__main__":

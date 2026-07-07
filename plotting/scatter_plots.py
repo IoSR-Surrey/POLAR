@@ -7,27 +7,6 @@ from utils.sofa_functions import sofa_find, get_IRs
 from utils.peripheral_processing import estimate_interaural_cues
 from utils.miscellaneous import ready_for_plotting
 
-def split_binaural_signals_by_listener(binaural_signals, n_listeners):
-
-    if binaural_signals.ndim == 4:
-        return [binaural_signals[0, listener_idx][None, ...] for listener_idx in range(n_listeners)]
-
-    if binaural_signals.ndim != 3:
-        raise ValueError(f"Expected binaural signals with 3 or 4 dimensions, got shape {tuple(binaural_signals.shape)}")
-
-    n_flat = binaural_signals.shape[0]
-    if n_flat == n_listeners:
-        return [binaural_signals[listener_idx][None, ...] for listener_idx in range(n_listeners)]
-
-    if n_flat % n_listeners != 0:
-        raise ValueError(
-            f"Cannot split {n_flat} binaural signals across {n_listeners} listeners"
-        )
-
-    binaural_signals = binaural_signals.reshape(n_flat // n_listeners, n_listeners, 2, -1)
-    return [binaural_signals[0, listener_idx][None, ...] for listener_idx in range(n_listeners)]
-
-
 def split_interaural_cues_by_listener(itd, ild, n_listeners):
 
     itd = ready_for_plotting(itd)
@@ -91,15 +70,6 @@ def _scatter_itd_ild_from_arrays(ax, estimated_itd, estimated_ild, target_itd, t
     return estimated_scatter
 
 
-def _itd_ild_scatter_on_axes(ax, binaural_signals, sofaile, target_angle, gtfb, lag_values, tau_iacc, title):
-
-    estimated_interaural_cues = estimate_interaural_cues(binaural_signals, gtfb, lag_values, tau_iacc)
-    estimated_itd = ready_for_plotting(estimated_interaural_cues['itd']).ravel()
-    estimated_ild = ready_for_plotting(estimated_interaural_cues['ild']).ravel()
-    target_itd, target_ild = _compute_target_itd_ild(sofaile, target_angle, gtfb, lag_values, tau_iacc)
-    return _scatter_itd_ild_from_arrays(ax, estimated_itd, estimated_ild, target_itd, target_ild, title)
-
-
 def _add_critical_band_colorbar(fig, scatter, axes, label='Critical band index'):
     fig.canvas.draw()
     if not isinstance(axes, (list, tuple, np.ndarray)):
@@ -111,16 +81,21 @@ def _add_critical_band_colorbar(fig, scatter, axes, label='Critical band index')
     fig.colorbar(scatter, cax=cbar_ax, label=label)
 
 
-def itd_ild_scatter_plot(binaural_signals, sofaile, target_angle, gtfb, lag_values, tau_iacc, n_listeners=1, listener_labels=None):
+def itd_ild_scatter_plot(estimated_itd, estimated_ild, sofaile, target_angle, gtfb, lag_values, tau_iacc, n_listeners=1, listener_labels=None):
 
-    listener_binaural_signals = split_binaural_signals_by_listener(binaural_signals, n_listeners)
+    # Estimated points come from the saved final-epoch interaural cues (the same
+    # grad-surgery pipeline used for the evolution GIF) so the two views agree.
+    listener_cues = split_interaural_cues_by_listener(estimated_itd, estimated_ild, n_listeners)
     if listener_labels is None:
         listener_labels = [f"VL {i}" for i in range(n_listeners)]
 
+    target_itd, target_ild = _compute_target_itd_ild(sofaile, target_angle, gtfb, lag_values, tau_iacc)
+
     if n_listeners == 1:
         fig, ax = plt.subplots()
-        estimated_scatter = _itd_ild_scatter_on_axes(
-            ax, listener_binaural_signals[0], sofaile, target_angle, gtfb, lag_values, tau_iacc,
+        cues_itd, cues_ild = listener_cues[0]
+        estimated_scatter = _scatter_itd_ild_from_arrays(
+            ax, np.ravel(cues_itd), np.ravel(cues_ild), target_itd, target_ild,
             f'ITD-ILD Scatter Plot for {target_angle}°',
         )
         fig.tight_layout()
@@ -133,9 +108,9 @@ def itd_ild_scatter_plot(binaural_signals, sofaile, target_angle, gtfb, lag_valu
     axes = axes.ravel()
 
     estimated_scatter = None
-    for listener_idx, listener_binaural in enumerate(listener_binaural_signals):
-        estimated_scatter = _itd_ild_scatter_on_axes(
-            axes[listener_idx], listener_binaural, sofaile, target_angle, gtfb, lag_values, tau_iacc,
+    for listener_idx, (cues_itd, cues_ild) in enumerate(listener_cues):
+        estimated_scatter = _scatter_itd_ild_from_arrays(
+            axes[listener_idx], np.ravel(cues_itd), np.ravel(cues_ild), target_itd, target_ild,
             f'{listener_labels[listener_idx]} — {target_angle}°',
         )
 

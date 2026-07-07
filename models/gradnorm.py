@@ -1,19 +1,18 @@
-import json
-
 import torch
 import torch.nn as nn
 
-with open('config/hyperpameters.json', 'r') as f:
-    hyperpameters = json.load(f)
-    gradnorm_alpha = hyperpameters["training"]["gradnorm_alpha"]
-    gradnorm_lr = hyperpameters["training"]["gradnorm_lr"]
+from models.mtl_base import MultiTaskOptimizer, load_training_config
+
+_training_config = load_training_config()
+gradnorm_alpha = _training_config["gradnorm_alpha"]
+gradnorm_lr = _training_config["gradnorm_lr"]
 
 
-class GradNorm:
+class GradNorm(MultiTaskOptimizer):
     """Adaptive task weighting via gradient norms (Chen et al., 2018)."""
 
     def __init__(self, task_names, alpha=gradnorm_alpha, lr=gradnorm_lr, task_importance=None, device='cpu', dtype=torch.float32):
-        self.task_names = list(task_names)
+        super().__init__(task_names)
         self.alpha = alpha
         self.weights = nn.Parameter(torch.ones(len(self.task_names), dtype=torch.float32))
         self.weight_optimizer = torch.optim.Adam([self.weights], lr=lr)
@@ -34,10 +33,7 @@ class GradNorm:
             self.weights.data.clamp_(min=1e-8)
             self.weights.data = self.weights.data * len(self.task_names) / self.weights.data.sum()
 
-    def _task_losses(self, loss_dict):
-        return [loss_dict[name] for name in self.task_names]
-
-    def _grad_norm(self, weighted_loss, shared_params):
+    def _compute_flat_grad(self, weighted_loss, shared_params):
         grads = torch.autograd.grad(
             weighted_loss,
             shared_params,
@@ -48,7 +44,10 @@ class GradNorm:
         flat_grads = [g.reshape(-1) for g in grads if g is not None]
         if not flat_grads:
             return torch.zeros((), device=weighted_loss.device, dtype=weighted_loss.dtype)
-        return torch.norm(torch.cat(flat_grads))
+        return torch.cat(flat_grads)
+
+    def _compute_grad_norm(self, flat_grad):
+        return torch.norm(flat_grad)
 
     def step(self, loss_dict, shared_params, model_optimizer):
         losses = self._task_losses(loss_dict)
@@ -56,9 +55,14 @@ class GradNorm:
         if self.initial_losses is None:
             self.initial_losses = torch.stack([loss.detach() for loss in losses])
 
+        flat_grads = []
         grad_norms = []
         for task_idx, loss in enumerate(losses):
-            grad_norms.append(self._grad_norm(self.weights[task_idx] * loss, shared_params))
+            flat_grad = self._compute_flat_grad(self.weights[task_idx] * loss, shared_params)
+            grad_norm = self._compute_grad_norm(flat_grad)
+            flat_grads.append(flat_grad)
+            grad_norms.append(grad_norm)
+        flat_grads = torch.stack(flat_grads)
         grad_norms = torch.stack(grad_norms)
 
         importance = self.task_importance
@@ -82,11 +86,13 @@ class GradNorm:
         total_loss.backward()
         model_optimizer.step()
 
-        effective_grad_norm = torch.norm(self.weights * grad_norms/old_weights)
+        raw_grads = {name: (flat_grads[i] / old_weights[i]).detach() for i, name in enumerate(self.task_names)}
+        effective_grads = {name: (flat_grads[i] * (self.weights[i] / old_weights[i])).detach() for i, name in enumerate(self.task_names)}
 
         return {
-            "grad_norms": grad_norms.detach(),
-            "effective_grad_norm": effective_grad_norm.detach(),
+            "raw_grads": raw_grads,
+            "effective_grads": effective_grads,
             "task_weights": self.weights.detach().clone(),
+            "grad_norms": grad_norms.detach(),
             "weighted_total": total_loss.detach(),
         }

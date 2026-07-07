@@ -4,7 +4,8 @@ import numpy as np
 
 from utils.peripheral_processing import estimate_interaural_cues
 from utils.itd_ild_distance import itd_ild_template_distance
-from utils.dsp import soft_argmax, rms
+from utils.dsp import rms
+from models.listener_based.common import create_interaural_template
 
 
 class desena2020(nn.Module):
@@ -107,14 +108,7 @@ class desena2020(nn.Module):
         self.Hmin = torch.min(estimated_uncertainty)
 
     def _create_template(self, hrirs):
-
-        self.template = estimate_interaural_cues(hrirs, self.gtfb, self.lag_values, self.tau_iacc)
-        self.template['weigthing_function'] = torch.linspace(0, 1, self.template['itd'].shape[1], device=self.device, dtype=self.dtype)
-        self.template['itd_max'] = torch.max(torch.abs(self.template['itd']), dim = 0).values
-        self.template['ild_max'] = torch.max(torch.abs(self.template['ild']), dim = 0).values
-        self.template['itd_normed'] = self.template['itd'] / self.template['itd_max']
-        self.template['ild_normed'] = self.template['ild'] / self.template['ild_max']
-        self.template['azimuths'] = torch.arange(-90, 95, 5, dtype=self.dtype, device=self.device) # Hard Coded from -90 to 90 in 5 degree steps
+        self.template = create_interaural_template(hrirs, self.gtfb, self.lag_values, self.tau_iacc, self.device, self.dtype)
 
 
     

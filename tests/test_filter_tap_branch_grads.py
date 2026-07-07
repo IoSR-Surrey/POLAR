@@ -52,7 +52,7 @@ def _training_setup(*, include_second_moment: bool):
     trainer = ModelTrainer(models, weights=weights)
     spk_filters = nn(torch.ones(1, 1))
     binaural = prop(torch.ones(1, 1, 1), spk_filters)
-    trainer.compute_estimates(binaural, spk_filters, listener_idx=0)
+    trainer.compute_estimates(binaural, spk_filters)
     trainer.compute_loss(targets)
     return nn, trainer
 

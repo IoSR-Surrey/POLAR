@@ -1,29 +1,29 @@
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 
-from utils.miscellaneous import ready_for_plotting, _flatten_tap_grads
+from utils.miscellaneous import ready_for_plotting
 from utils.dsp import cosine_similarity
 
-def time_domain_filters_plot(filters):
+def time_domain_filters_plot(filters, fs=48000):
 
     filters = ready_for_plotting(filters)
     if filters.ndim == 3:
-        filters = filters[0]  # (batch, n_sources, n_samples) -> (n_sources, n_samples)
+        filters = filters[0]  # (batch, n_sources, n_taps) -> (n_sources, n_taps)
     elif filters.ndim == 4:
-        filters = filters[-1][0]  # (epoch, batch, n_samples, n_channels) -> (n_samples, n_channels)
+        filters = filters[-1][0]  # (epoch, batch, n_sources, n_taps) -> (n_sources, n_taps)
 
     n_filters = filters.shape[0]
     n_samples = filters.shape[1]
+    time_axis = np.arange(n_samples) / fs * 1000  # ms
 
     grid_size = int(np.ceil(np.sqrt(n_filters)))
     fig, ax = plt.subplots(grid_size, grid_size, figsize=(10, 10), squeeze=False)
     ax = ax.ravel()
 
     for i in range(n_filters):
-        ax[i].plot(filters[i, :])
+        ax[i].plot(time_axis, filters[i, :])
         ax[i].set_title(f"Filter {i+1}")
-        ax[i].set_xlabel("Time")
+        ax[i].set_xlabel("Time (ms)")
         ax[i].set_ylabel("Amplitude")
         ax[i].grid(True)
 
@@ -38,9 +38,9 @@ def frequency_domain_filters_plot(filters, fs=48000, nfft = 2048):
     filters = ready_for_plotting(filters)
 
     if filters.ndim == 3:
-        filters = filters[0]  # (batch, n_sources, n_samples) -> (n_sources, n_samples)
+        filters = filters[0]  # (batch, n_sources, n_taps) -> (n_sources, n_taps)
     elif filters.ndim == 4:
-        filters = filters[-1][0]  # (epoch, batch, n_samples, n_channels) -> (n_samples, n_channels)
+        filters = filters[-1][0]  # (epoch, batch, n_sources, n_taps) -> (n_sources, n_taps)
     
     n_filters = filters.shape[0]
     n_samples = filters.shape[1]
@@ -66,78 +66,21 @@ def frequency_domain_filters_plot(filters, fs=48000, nfft = 2048):
 
     plt.tight_layout()
 
-def cosine_similarity_over_epochs_plot(a, b, title):
-
-    cosine_similarity_over_epochs = []
-    for i in range(len(a)):
-        cosine_similarity_over_epochs.append(cosine_similarity(a[i], b[i]))
-        
-    cosine_similarity_over_epochs = ready_for_plotting(cosine_similarity_over_epochs)
+def raw_grad_cosine_to_reference_plot(raw_grads, reference_grads, task_names, title):
+    """Per-task cosine similarity between each task's raw gradient and a reference
+    gradient (e.g. the summed 'plain' gradient or the CAGrad combined gradient),
+    one line per task over epochs."""
+    n_epochs = len(raw_grads)
 
     plt.figure()
-    plt.plot(cosine_similarity_over_epochs)
-    plt.title(f"Cosine Similarity Over Epochs Plot for {title}")
-    plt.xlabel("Epoch")
-    plt.ylabel("Cosine Similarity")
-    plt.grid(True)
-    plt.tight_layout()
-
-
-def filter_tap_branch_cosine_similarity_over_epochs_plot(grad_itd_on_taps, grad_ild_on_taps, title):
-
-    cosine_similarity_over_epochs = []
-    for i in range(len(grad_itd_on_taps)):
-        a = _flatten_tap_grads(grad_itd_on_taps[i])
-        b = _flatten_tap_grads(grad_ild_on_taps[i])
-        if a is None or b is None:
-            cosine_similarity_over_epochs.append(float("nan"))
-        else:
-            cosine_similarity_over_epochs.append(cosine_similarity(a, b))
-
-    cosine_similarity_over_epochs = ready_for_plotting(cosine_similarity_over_epochs)
-
-    plt.figure()
-    plt.plot(cosine_similarity_over_epochs)
-    plt.title(f"Filter Tap Branch Cosine Similarity Over Epochs for {title}")
-    plt.xlabel("Epoch")
-    plt.ylabel("Cosine Similarity")
-    plt.grid(True)
-    plt.tight_layout()
-
-
-def grad_norms_over_epochs_plot(grad_itd, grad_ild, title):
-
-
-    grad_norm_itd = [torch.norm(grad_itd[i]) for i in range(len(grad_itd))]
-    grad_norm_ild = [torch.norm(grad_ild[i]) for i in range(len(grad_ild))]
-
-    grad_norm_itd = ready_for_plotting(grad_norm_itd)
-    grad_norm_ild = ready_for_plotting(grad_norm_ild)
-
-    plt.figure()
-    plt.plot(grad_norm_itd, label="Grad Norm ITD")
-    plt.plot(grad_norm_ild, label="Grad Norm ILD")
+    for name in task_names:
+        cosines = [cosine_similarity(raw_grads[epoch][name], reference_grads[epoch]) for epoch in range(n_epochs)]
+        plt.plot(ready_for_plotting(cosines), label=name)
     plt.legend()
-    plt.title(f"Grad Norms Over Epochs Plot for {title}")
+    plt.title(title)
     plt.xlabel("Epoch")
-    plt.ylabel("Grad Norm")
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-
-
-def filter_tap_branch_grad_norms_over_epochs_plot(grad_norm_itd_on_taps, grad_norm_ild_on_taps):
-
-    grad_norm_itd = ready_for_plotting(grad_norm_itd_on_taps)
-    grad_norm_ild = ready_for_plotting(grad_norm_ild_on_taps)
-
-    plt.figure()
-    plt.plot(grad_norm_itd, label="Filter tap grad norm ITD")
-    plt.plot(grad_norm_ild, label="Filter tap grad norm ILD")
-    plt.legend()
-    plt.title(f"Filter Tap Branch Grad Norms Over Epochs")
-    plt.xlabel("Epoch")
-    plt.ylabel("Grad norm")
+    plt.ylabel("Cosine similarity")
+    plt.ylim(-1.05, 1.05)
     plt.grid(True)
     plt.tight_layout()
 
@@ -164,12 +107,19 @@ def plot_loss_and_estimates(loss_dict, estimates, title, n_listeners=None, liste
         plt.xlabel("Epoch")
         plt.ylabel("Loss")
         plt.grid(True)
+        if "llado" in key:
+            estimate_ylabel = "Azimuth (deg)"
+        elif "desena" in key:
+            estimate_ylabel = "Uncertainty"
+        else:
+            estimate_ylabel = "Estimate"
+
         plt.subplot(2, 1, 2)
         for i in range(n_series):
             plt.plot(np.squeeze(model_estimates[..., i]), label=series_labels[i])
         plt.title(f"{key} estimate over epochs for {title}")
         plt.xlabel("Epoch")
-        plt.ylabel("Estimate")
+        plt.ylabel(estimate_ylabel)
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
@@ -185,7 +135,7 @@ def plot_loss_and_estimates(loss_dict, estimates, title, n_listeners=None, liste
         plt.tight_layout()
 
 
-def loss_grad_norms_over_epochs_plot(loss_grad_norms, title):
+def loss_grad_norms_over_epochs_plot(loss_grad_norms, title, norm_kind="Effective"):
 
     n_epochs = len(loss_grad_norms)
     keys = [key for key in loss_grad_norms[0].keys() if key != "total"]
@@ -195,19 +145,27 @@ def loss_grad_norms_over_epochs_plot(loss_grad_norms, title):
         grad_norms = np.squeeze(ready_for_plotting([loss_grad_norms[epoch][key] for epoch in range(n_epochs)]))
         plt.plot(grad_norms, label=key)
     plt.legend()
-    plt.title(f"Effective loss grad norms on filter taps for {title}")
+    plt.title(f"{norm_kind} loss grad norms on filter taps for {title}")
     plt.xlabel("Epoch")
-    plt.ylabel("Effective grad norm")
+    plt.ylabel(f"{norm_kind} grad norm")
     plt.grid(True)
     plt.tight_layout()
 
 
-def task_grad_pairwise_cosine_similarity_plot(task_names, mean_matrix, pairwise_labels, pairwise_over_epochs, ref_cosines_over_epochs, title):
+def task_grad_pairwise_cosine_similarity_plot(task_names, mean_matrix, pairwise_labels, pairwise_over_epochs, ref_cosines_over_epochs, title, use_combined_reference=False, combined_norm_over_epochs=None, pairwise_only=False):
 
     mean_matrix = ready_for_plotting(mean_matrix)
     n_tasks = len(task_names)
+    if pairwise_only:
+        n_rows = 2
+    elif combined_norm_over_epochs is not None:
+        n_rows = 4
+    else:
+        n_rows = 3
 
-    fig, axes = plt.subplots(3, 1, figsize=(8, 14))
+    fig, axes = plt.subplots(n_rows, 1, figsize=(8, 4 * n_rows))
+    if n_rows == 1:
+        axes = [axes]
 
     im = axes[0].imshow(mean_matrix, vmin=-1, vmax=1, cmap="RdBu_r")
     axes[0].set_xticks(range(n_tasks))
@@ -229,13 +187,46 @@ def task_grad_pairwise_cosine_similarity_plot(task_names, mean_matrix, pairwise_
         axes[1].legend()
     axes[1].grid(True)
 
+    if pairwise_only:
+        plt.tight_layout()
+        return
+
     for name in task_names:
         axes[2].plot(ref_cosines_over_epochs[name], label=name)
     axes[2].set_xlabel("Epoch")
     axes[2].set_ylabel("Cosine Similarity")
-    axes[2].set_title(f"Task grad cosine similarity to fixed reference [1, 0, ...] for {title}")
+    if use_combined_reference:
+        axes[2].set_title(f"Task grad cosine similarity to combined gradient for {title}")
+    else:
+        axes[2].set_title(f"Task grad cosine similarity to fixed reference [1, 0, ...] for {title}")
     axes[2].legend()
     axes[2].grid(True)
+
+    if combined_norm_over_epochs is not None:
+        axes[3].plot(ready_for_plotting(combined_norm_over_epochs), label="combined")
+        axes[3].set_xlabel("Epoch")
+        axes[3].set_ylabel("Grad norm")
+        axes[3].set_title(f"Combined gradient norm over epochs for {title}")
+        axes[3].legend()
+        axes[3].grid(True)
+    plt.tight_layout()
+
+
+def cagrad_task_coeffs_over_epochs_plot(cagrad_task_coeffs, task_names, title, extra_series=None, ylabel="Task coefficient"):
+
+    coeffs = np.asarray(ready_for_plotting(cagrad_task_coeffs))
+
+    plt.figure()
+    for i, name in enumerate(task_names):
+        plt.plot(coeffs[..., i], label=name)
+    if extra_series is not None:
+        for label, series in extra_series.items():
+            plt.plot(np.asarray(ready_for_plotting(series)), label=label, linestyle=":")
+    plt.legend()
+    plt.title(f"{title} over epochs")
+    plt.xlabel("Epoch")
+    plt.ylabel(ylabel)
+    plt.grid(True)
     plt.tight_layout()
 
 

@@ -11,7 +11,9 @@ import numpy as np
 import pytest
 import torch
 
-from utils.miscellaneous import _flatten_tap_grads, load_npy_to_torch, ready_for_plotting, target_angle_for_listeners
+from utils.miscellaneous import _flatten_tap_grads, create_mtl_optimizer, load_npy_to_torch, ready_for_plotting, target_angle_for_listeners
+from logger.saving import task_grad_pairwise_cosine_similarity_stats
+from models.train import ModelTrainer
 
 
 def test_load_npy_to_torch_round_trip() -> None:
@@ -78,3 +80,55 @@ def test_target_angle_for_listeners_matches_propagation_helper():
     target_pos = torch.tensor([2.0 * torch.cos(torch.deg2rad(torch.tensor(30.0))), 2.0 * torch.sin(torch.deg2rad(torch.tensor(30.0)))])
     expected = _calculate_source_angle_2D(lstn, target_pos.unsqueeze(0)).squeeze(0)
     assert torch.allclose(target_angle_for_listeners(lstn, target_pos), expected)
+
+
+def test_create_mtl_optimizer_returns_none_for_plain() -> None:
+    trainer = ModelTrainer([_MockModel()])
+    assert create_mtl_optimizer(trainer, "plain") is None
+
+
+def test_create_mtl_optimizer_returns_gradnorm() -> None:
+    from models.gradnorm import GradNorm
+
+    trainer = ModelTrainer([_MockModel()], weights=[2.0])
+    mtl = create_mtl_optimizer(trainer, "gradnorm")
+
+    assert isinstance(mtl, GradNorm)
+    assert mtl.task_names == ["_MockModel"]
+
+
+def test_create_mtl_optimizer_returns_cagrad() -> None:
+    from models.cagrad import CAGrad
+
+    trainer = ModelTrainer([_MockModel()])
+    mtl = create_mtl_optimizer(trainer, "cagrad")
+
+    assert isinstance(mtl, CAGrad)
+    assert mtl.task_names == ["_MockModel"]
+
+
+class _MockModel(torch.nn.Module):
+    model_type = "listener_based"
+
+    def forward(self, x):
+        return {"output": x.sum(dim=-1), "kwargs": {}}
+
+
+def test_task_grad_pairwise_cosine_similarity_stats_with_combined_reference() -> None:
+    g_a = torch.tensor([1.0, 0.0])
+    g_b = torch.tensor([1.0, 0.0])
+    g_combined = torch.tensor([1.0, 0.0])
+    loss_grad_vectors = [
+        {"task_a": g_a, "task_b": g_b},
+        {"task_a": g_a, "task_b": g_b},
+    ]
+    combined_grad_vectors = [g_combined, g_combined]
+
+    stats = task_grad_pairwise_cosine_similarity_stats(
+        loss_grad_vectors, combined_grad_vectors=combined_grad_vectors,
+    )
+
+    assert stats["use_combined_reference"] is True
+    assert stats["ref_cosines_over_epochs"]["task_a"] == [pytest.approx(1.0), pytest.approx(1.0)]
+    assert stats["ref_cosines_over_epochs"]["task_b"] == [pytest.approx(1.0), pytest.approx(1.0)]
+    assert stats["combined_norm_over_epochs"] == [pytest.approx(1.0), pytest.approx(1.0)]

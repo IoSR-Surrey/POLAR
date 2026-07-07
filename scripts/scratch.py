@@ -9,30 +9,25 @@ os.chdir(ROOT)
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
 
 from utils.sofa_functions import load_sofa, get_template_for_llado2025_desena_2020
-from utils.miscellaneous import load_npy_to_torch, target_angle_for_listeners
-
-from models.listener_based.llado2025.model import llado2025_grad_surgery
-from models.listener_based.desena2020.model import desena2020
-from models.louspeaker_based.second_moment.model import SecondMoment
-from models.train import ModelTrainer
-from models.gradnorm import GradNorm
+from utils.miscellaneous import (load_npy_to_torch, 
+                                target_angle_for_listeners, 
+                                create_mtl_optimizer, 
+                                run_mtl_optimizer_step)
 
 from filter_estimation.model import MultiSourceFIR
-
 from propagation.model import BinauralFreeFieldPropagation
-
+from models.listener_based.llado2025.model import llado2025_grad_surgery
+from models.listener_based.desena2020.model import desena2020
+from models.train import ModelTrainer
+from logger.saving import SavingManager
 from plotting.miscellaneous import ALL_PLOTTING_FUNCTIONS
-
 from logger.printing import print_loss_and_estimates
-from logger.saving import SavingManager, extract_loss_grad_norms
 
 with open('config/hyperpameters.json', 'r') as f:
     config = json.load(f)
-use_gradnorm = config["training"]["use_gradnorm"]
+mtl_optimizer = config["training"]["mtl_optimizer"]
 skip_keys = config["saving"]["skip_keys"]
 use_tensorboard = config["saving"]["use_tensorboard"]
     
@@ -42,7 +37,7 @@ gtfb = load_npy_to_torch("data/banks/gtfb_48k.npy")
 lag_values = torch.arange(-0.001*48000, 0.001*48000 + 1, 1, dtype=torch.float32, device=hrirs.device) / 48000
 
 d = 2
-lstn_pos = torch.tensor([[0, 0], [0, 0.25], [0, -0.25]])
+lstn_pos = torch.tensor([[0, 0], [0, 0.5], [0, -0.5]])
 spk_pos = torch.tensor([[d*torch.cos(torch.deg2rad(torch.tensor(30))), d*torch.sin(torch.deg2rad(torch.tensor(30)))], 
                         [d*torch.cos(torch.deg2rad(torch.tensor(30))), -d*torch.sin(torch.deg2rad(torch.tensor(30)))]])
 
@@ -58,61 +53,56 @@ n_sources = len(spk_pos)
 n_taps = 32
 nn = MultiSourceFIR(n_taps, n_sources)
 nn.set_filter_initialisation("middle")
-second_moment_model = SecondMoment(n_taps, n_sources)
 
-modelTrainer = ModelTrainer([llado_model], weights=[1.0])
-targets = {"llado2025_grad_surgery": target_angle_for_listeners(lstn_pos, target_position).unsqueeze(0)}
+modelTrainer = ModelTrainer(
+    [llado_model, desena_model],
+    weights=[1.0, 1.0],
+)
+targets = {
+    "llado2025_grad_surgery": target_angle_for_listeners(lstn_pos, target_position).unsqueeze(0),
+    "desena2020": torch.zeros(1, len(lstn_pos)),
+    # "SecondMoment": torch.zeros(1, n_sources),
+}
 
 stim = torch.ones(1,1,1)
 
-optimizer = torch.optim.Adam(nn.parameters(), lr=0.1)
-gradnorm = GradNorm(
-    list(modelTrainer.model_dict.keys()),
-    task_importance=[model["weight"] for model in modelTrainer.model_dict.values()],
-) if use_gradnorm else None
+optimizer = torch.optim.Adam(nn.parameters(), lr=0.01)
+mtl = create_mtl_optimizer(modelTrainer, mtl_optimizer)
 
-saving_manager = SavingManager("outputs/scratch", skip_keys=skip_keys, timestamp=True, use_tensorboard=use_tensorboard)
+saving_manager = SavingManager(
+    f"outputs/{mtl_optimizer}", skip_keys=skip_keys, timestamp=True, use_tensorboard=use_tensorboard,
+    task_names=list(modelTrainer.model_dict.keys()),
+)
 
 saving_manager.save("gtfb", gtfb)
 saving_manager.save("lag_values", lag_values)
 saving_manager.save("tau_iacc", 1e-2)
 saving_manager.save("target_angle", target_angle)
+saving_manager.save("target_position", target_position)
 saving_manager.save("lstn_pos", lstn_pos)
 saving_manager.save("spk_pos", spk_pos)
 saving_manager.save("sofaile", sofaile)
 
 
 dummy_input = torch.ones(1,1)
-for i in range(500):
+for i in range(1000):
 
     saving_manager.set_step(i)
     spk_filters = nn(dummy_input)
 
     binaural_signals = prop(stim, spk_filters)
 
-    modelTrainer.compute_estimates(binaural_signals, spk_filters, listener_idx=0)
+    modelTrainer.compute_estimates(binaural_signals, spk_filters)
     loss_dict = modelTrainer.compute_loss(targets)
-
-    optimizer.zero_grad()
-    cues = modelTrainer.kwargs_output["llado2025_grad_surgery"]["interauralcues"]
-    saving_manager.save("interaural_cues", {"itd": cues["itd"].detach(), "ild": cues["ild"].detach()})
     saving_manager.save("loss_dict", loss_dict)
     saving_manager.save("modelTrainer.estimates", modelTrainer.estimates)
-    loss_grad_norms = extract_loss_grad_norms(loss_dict, nn)
-    saving_manager.save_loss_grad_vectors(loss_dict, nn)
-    saving_manager.save_branch_grads(modelTrainer)
-    saving_manager.save_filter_tap_branch_grads(modelTrainer, nn)
-    
-    if use_gradnorm:
-        gradnorm_info = gradnorm.step(loss_dict, list(nn.parameters()), optimizer)
-        saving_manager.save("gradnorm_task_weights", gradnorm_info["task_weights"])
-        saving_manager.save("gradnorm_grad_norms", gradnorm_info["grad_norms"])
-        saving_manager.save_effective_loss_grad_norms(loss_grad_norms, modelTrainer, gradnorm_info["task_weights"])
-    else:
-        loss_dict['total'].backward()
-        optimizer.step()
-        saving_manager.save_effective_loss_grad_norms(loss_grad_norms, modelTrainer)
-    
+    if {"llado2025_grad_surgery", "desena2020", "llado2025"} & set(loss_dict):
+        cues = modelTrainer.kwargs_output["llado2025_grad_surgery"]["interauralcues"]
+        saving_manager.save("interaural_cues", {"itd": cues["itd"].detach(), "ild": cues["ild"].detach()})
+
+    optimizer.zero_grad()
+    run_mtl_optimizer_step(mtl_optimizer, mtl, loss_dict, nn, optimizer, saving_manager, modelTrainer)
+
     saving_manager.flush_tensorboard()
     print_loss_and_estimates(loss_dict, modelTrainer.estimates, i)
 
