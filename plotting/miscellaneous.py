@@ -21,49 +21,50 @@ from plotting.spatial_plots import localisation_arrows_plot
 
 def ALL_PLOTTING_FUNCTIONS(saving_manager):
 
-    spk_filters = saving_manager.saved_data["spk_filters"][0]
-    binaural_signals = saving_manager.saved_data["binaural_signals"][0]
-    sofaile = saving_manager.saved_data["sofaile"][0]
-    target_angle = saving_manager.saved_data["target_angle"][0]
-    gtfb = saving_manager.saved_data["gtfb"][0]
-    lag_values = saving_manager.saved_data["lag_values"][0]
-    tau_iacc = saving_manager.saved_data["tau_iacc"][0]
     n_listeners, listener_labels = get_listener_plot_info(saving_manager)
 
-    time_domain_filters_plot(spk_filters)
-    saving_manager.save_new_plots("time_domain_filters")
-    frequency_domain_filters_plot(spk_filters)
-    saving_manager.save_new_plots("frequency_domain_filters")
-    itd_ild_scatter_plot(
-        binaural_signals, sofaile, target_angle, gtfb, lag_values, tau_iacc,
-        n_listeners=n_listeners, listener_labels=listener_labels,
-    )
-    saving_manager.save_new_plots("itd_ild_scatter")
-    if "interaural_cues" in saving_manager.saved_data and len(saving_manager.saved_data["interaural_cues"]) > 1:
-        itd_ild_scatter_evolution_gif(saving_manager, n_listeners=n_listeners, listener_labels=listener_labels)
-    grad_norms_over_epochs_plot(saving_manager.saved_data["rectified_signals_grad_itd"], saving_manager.saved_data["rectified_signals_grad_ild"], "Grad Norms Plot")
-    saving_manager.save_new_plots("rectified_signals_grad_norms")
-    filter_tap_branch_grad_norms_over_epochs_plot(saving_manager.saved_data["grad_itd_on_taps_norm"], saving_manager.saved_data["grad_ild_on_taps_norm"])
-    saving_manager.save_new_plots("filter_tap_branch_grad_norms")
-    filter_tap_branch_cosine_similarity_over_epochs_plot(saving_manager.saved_data["grad_itd_on_taps"], saving_manager.saved_data["grad_ild_on_taps"], "Filter Taps")
-    saving_manager.save_new_plots("filter_tap_branch_cosine_similarity")
-    plot_loss_and_estimates(
-        saving_manager.saved_data["loss_dict"],
-        saving_manager.saved_data["modelTrainer.estimates"],
-        "Loss and Estimates",
-        n_listeners=n_listeners,
-        listener_labels=listener_labels,
-    )
-    loss_names = [f"loss_and_estimates_{key}" for key in saving_manager.saved_data["loss_dict"][0].keys() if key != "total"]
-    if "total" in saving_manager.saved_data["loss_dict"][0]:
-        loss_names.append("loss_and_estimates_total")
-    saving_manager.save_new_plots("loss_and_estimates", names=loss_names)
+    if "spk_filters" in saving_manager.saved_data:
+        spk_filters = saving_manager.saved_data["spk_filters"][0]
+        time_domain_filters_plot(spk_filters)
+        saving_manager.save_new_plots("time_domain_filters")
+        frequency_domain_filters_plot(spk_filters)
+        saving_manager.save_new_plots("frequency_domain_filters")
+    
+    if "interaural_cues" in saving_manager.saved_data:
+        itd_ild_scatter_plot(
+            saving_manager.saved_data["binaural_signals"][0],
+            saving_manager.saved_data["sofaile"][0],
+            saving_manager.saved_data["target_angle"][0],
+            saving_manager.saved_data["gtfb"][0],
+            saving_manager.saved_data["lag_values"][0],
+            saving_manager.saved_data["tau_iacc"][0],
+        )
+        saving_manager.save_new_plots("itd_ild_scatter")
+        if len(saving_manager.saved_data["interaural_cues"]) > 1:
+            itd_ild_scatter_evolution_gif(saving_manager, n_listeners=n_listeners, listener_labels=listener_labels)
+            saving_manager.save_new_plots("itd_ild_scatter_evolution")
+
+    if "loss_dict" in saving_manager.saved_data and "modelTrainer.estimates" in saving_manager.saved_data:
+        plot_loss_and_estimates(
+            saving_manager.saved_data["loss_dict"],
+            saving_manager.saved_data["modelTrainer.estimates"],
+            "Loss and Estimates",
+            n_listeners=n_listeners,
+            listener_labels=listener_labels,
+        )
+        saving_manager.save_new_plots("loss_and_estimates")
+        loss_names = [f"loss_and_estimates_{key}" for key in saving_manager.saved_data["loss_dict"][0].keys() if key != "total"]
+        if "total" in saving_manager.saved_data["loss_dict"][0]:
+            loss_names.append("loss_and_estimates_total")
+        saving_manager.save_new_plots("loss_and_estimates", names=loss_names)
+
     if "loss_grad_vectors" in saving_manager.saved_data:
         task_grad_pairwise_cosine_similarity_plot(
             **task_grad_pairwise_cosine_similarity_stats(saving_manager.saved_data["loss_grad_vectors"]),
             title="Task Gradients on Filter Taps",
         )
         saving_manager.save_new_plots("task_grad_pairwise_cosine_similarity")
+
     if "loss_grad_norms" in saving_manager.saved_data:
         loss_grad_norms_over_epochs_plot(saving_manager.saved_data["loss_grad_norms"], "Effective Loss Grad Norms")
         saving_manager.save_new_plots("loss_grad_norms")
@@ -72,6 +73,7 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager):
         gradnorm_task_weights_over_epochs_plot(saving_manager.saved_data["gradnorm_task_weights"], task_names, "GradNorm Task Weights")
         saving_manager.save_new_plots("gradnorm_task_weights")
     if all(key in saving_manager.saved_data for key in ("lstn_pos", "spk_pos", "localisation_angles", "localisation_uncertainty")):
+        target_angle = saving_manager.saved_data["target_angle"][0]
         localisation_arrows_plot(
             saving_manager.saved_data["lstn_pos"][0],
             saving_manager.saved_data["spk_pos"][0],
@@ -81,6 +83,9 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager):
             listener_labels=listener_labels,
         )
         saving_manager.save_new_plots("localisation_arrows")
+
+    
+
     _close_buttons = create_close_button()
     plt.show()
 
@@ -111,5 +116,6 @@ def create_close_button():
         ax_button.set_zorder(10)
         button = Button(ax_button, 'Close All Figures')
         button.on_clicked(close_all)
+        fig._close_all_button = button
         buttons.append(button)
     return buttons
