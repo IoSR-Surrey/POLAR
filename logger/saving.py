@@ -27,7 +27,7 @@ _TENSORBOARD_SKIP_KEYS = {
 
 class SavingManager:
 
-    def __init__(self, output_dir=None, skip_keys=None, timestamp=False, use_tensorboard=False):
+    def __init__(self, output_dir=None, skip_keys=None, timestamp=False, use_tensorboard=False, task_names=None):
         
         self.saved_data = {}
         self.output_dir = None
@@ -36,6 +36,7 @@ class SavingManager:
         self._tensorboard_proc = None
         self._tensorboard_url = None
         self._step = None
+        self._task_names = list(task_names) if task_names is not None else None
         self._skip_keys = set(skip_keys) if skip_keys is not None else {"sofaile"}
         self._tensorboard_skip_keys = self._skip_keys | _TENSORBOARD_SKIP_KEYS
 
@@ -96,7 +97,7 @@ class SavingManager:
 
     def save_effective_loss_grad_norms(self, loss_grad_norms, model_trainer, gradnorm_task_weights=None):
         effective_loss_grad_norms = to_effective_loss_grad_norms(loss_grad_norms, model_trainer, gradnorm_task_weights)
-        self.save("loss_grad_norms", effective_loss_grad_norms)
+        self.save("effective_grad_norms", effective_loss_grad_norms)
 
     def save_loss_grad_vectors(self, loss_dict, filter_module):
         self.save("loss_grad_vectors", extract_loss_grad_vectors(loss_dict, filter_module))
@@ -130,7 +131,10 @@ class SavingManager:
             self._tensorboard_proc = None
 
     def save_new_plots(self, basename, names=None):
+        import io
+
         import matplotlib.pyplot as plt
+        from PIL import Image
 
         if self.output_dir is None:
             self._seen_fignums = set(plt.get_fignums())
@@ -148,9 +152,16 @@ class SavingManager:
             else:
                 filename = f"{basename}_{i}"
             fig = plt.figure(fig_num)
-            fig.savefig(plot_dir / f"{filename}.png", bbox_inches="tight", dpi=150)
+            path = plot_dir / f"{filename}.png"
             if self._writer is not None:
-                self._writer.add_figure(f"plots/{filename}", fig, global_step=0)
+                buf = io.BytesIO()
+                fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+                png_bytes = buf.getvalue()
+                path.write_bytes(png_bytes)
+                img = np.array(Image.open(io.BytesIO(png_bytes)))
+                self._writer.add_image(f"plots/{filename}", img, global_step=0, dataformats="HWC")
+            else:
+                fig.savefig(path, bbox_inches="tight", dpi=150)
 
         self._seen_fignums |= set(new_fignums)
 
@@ -188,18 +199,47 @@ def _is_scalar_like(value):
     return False
 
 
+def _tensorboard_value(key, value, task_names):
+    if task_names is not None and key in ("gradnorm_task_weights", "gradnorm_grad_norms"):
+        array = np.asarray(_to_numpy(value)).reshape(-1)
+        return {name: float(v) for name, v in zip(task_names, array)}
+    return value
+
+
+def _scalar_value(value):
+    if _is_scalar_like(value):
+        return float(value.item() if isinstance(value, np.ndarray) else value)
+    return None
+
+
+def _series_dict_from_array(value):
+    return {str(i): float(v) for i, v in enumerate(np.asarray(value).reshape(-1))}
+
+
 def _log_to_tensorboard(writer, tag, value, step):
     value = _to_numpy(value)
     if isinstance(value, dict):
+        scalar_dict = {}
+        series_items = []
         for key, item in value.items():
-            _log_to_tensorboard(writer, f"{tag}/{key}", item, step)
+            scalar = _scalar_value(item)
+            if scalar is not None:
+                scalar_dict[key] = scalar
+            elif isinstance(item, np.ndarray) and item.size <= 16:
+                series_items.append((key, item))
+            else:
+                _log_to_tensorboard(writer, f"{tag}/{key}", item, step)
+        if scalar_dict:
+            writer.add_scalars(tag, scalar_dict, step)
+        for key, item in series_items:
+            writer.add_scalars(f"{tag}/{key}", _series_dict_from_array(item), step)
         return
-    if _is_scalar_like(value):
-        writer.add_scalar(tag, value.item() if isinstance(value, np.ndarray) else value, step)
+    scalar = _scalar_value(value)
+    if scalar is not None:
+        writer.add_scalar(tag, scalar, step)
         return
     if isinstance(value, np.ndarray) and value.size <= 16:
-        for i, item in enumerate(value.reshape(-1)):
-            writer.add_scalar(f"{tag}/{i}", item, step)
+        writer.add_scalars(tag, _series_dict_from_array(value), step)
 
 
 def _json_ready(value):
