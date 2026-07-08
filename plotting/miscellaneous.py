@@ -12,6 +12,7 @@ from plotting.XY_plots import (time_domain_filters_plot,
                      plot_loss_and_estimates,
                      loss_grad_norms_over_epochs_plot,
                      gradnorm_task_weights_over_epochs_plot,
+                     cagrad_dual_weights_over_epochs_plot,
                      cagrad_task_coeffs_over_epochs_plot,
                      task_grad_pairwise_cosine_similarity_plot)
 from plotting.scatter_plots import itd_ild_scatter_plot, itd_ild_scatter_evolution_gif
@@ -78,9 +79,9 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager):
             {key: torch.norm(epoch_grads[key]) for key in epoch_grads}
             for epoch_grads in saving_manager.saved_data["effective_grads"]
         ]
-        loss_grad_norms_over_epochs_plot(raw_grad_norms, "Raw Loss Grad Norms", norm_kind="Raw")
+        loss_grad_norms_over_epochs_plot(raw_grad_norms, "Per-task raw gradient norm", norm_kind="Raw")
         saving_manager.save_new_plots("raw_grad_norms")
-        loss_grad_norms_over_epochs_plot(effective_grad_norms, "Effective Loss Grad Norms", norm_kind="Effective")
+        loss_grad_norms_over_epochs_plot(effective_grad_norms, "Per-task effective gradient norm", norm_kind="Effective")
         saving_manager.save_new_plots("effective_grad_norms")
 
         if "gradnorm_task_weights" in saving_manager.saved_data:
@@ -102,17 +103,20 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager):
             {key: torch.norm(epoch_grads[key]) for key in epoch_grads}
             for epoch_grads in saving_manager.saved_data["raw_grads"]
         ]
-        loss_grad_norms_over_epochs_plot(raw_grad_norms, "Raw Loss Grad Norms", norm_kind="Raw")
+        loss_grad_norms_over_epochs_plot(raw_grad_norms, "Per-task raw gradient norm", norm_kind="Raw")
         saving_manager.save_new_plots("raw_grad_norms")
 
+        if "cagrad_dual_weights" in saving_manager.saved_data:
+            cagrad_dual_weights_over_epochs_plot(
+                saving_manager.saved_data["cagrad_dual_weights"], task_names,
+                "CAGrad task mix (weights sum to 1)",
+            )
+            saving_manager.save_new_plots("cagrad_dual_weights")
+
         if "cagrad_task_coeffs" in saving_manager.saved_data:
-            extra_series = None
-            if "cagrad_dual_weights" in saving_manager.saved_data:
-                dual_weights = np.asarray(ready_for_plotting(saving_manager.saved_data["cagrad_dual_weights"]))
-                extra_series = {f"{name} dual weight": dual_weights[..., i] for i, name in enumerate(task_names)}
             cagrad_task_coeffs_over_epochs_plot(
                 saving_manager.saved_data["cagrad_task_coeffs"], task_names,
-                "CAGrad task coefficients", extra_series=extra_series,
+                "CAGrad gradient multiplier per task",
             )
             saving_manager.save_new_plots("cagrad_task_coeffs")
 
@@ -125,13 +129,13 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager):
         # How each task's raw gradient aligns with the plain (summed) direction.
         raw_grad_cosine_to_reference_plot(
             saving_manager.saved_data["raw_grads"], summed_raw_grad, task_names,
-            "Raw grads vs summed (plain) gradient",
+            "Task gradient vs plain (summed) direction",
         )
         saving_manager.save_new_plots("raw_vs_plain_cosine_similarity")
         # How each task's raw gradient aligns with the CAGrad combined direction.
         raw_grad_cosine_to_reference_plot(
             saving_manager.saved_data["raw_grads"], saving_manager.saved_data["effective_grad"], task_names,
-            "Raw grads vs CAGrad combined gradient",
+            "Task gradient vs CAGrad update direction",
         )
         saving_manager.save_new_plots("raw_vs_cagrad_cosine_similarity")
 

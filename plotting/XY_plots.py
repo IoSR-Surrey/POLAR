@@ -145,7 +145,7 @@ def loss_grad_norms_over_epochs_plot(loss_grad_norms, title, norm_kind="Effectiv
         grad_norms = np.squeeze(ready_for_plotting([loss_grad_norms[epoch][key] for epoch in range(n_epochs)]))
         plt.plot(grad_norms, label=key)
     plt.legend()
-    plt.title(f"{norm_kind} loss grad norms on filter taps for {title}")
+    plt.title(title)
     plt.xlabel("Epoch")
     plt.ylabel(f"{norm_kind} grad norm")
     plt.grid(True)
@@ -212,20 +212,33 @@ def task_grad_pairwise_cosine_similarity_plot(task_names, mean_matrix, pairwise_
     plt.tight_layout()
 
 
-def cagrad_task_coeffs_over_epochs_plot(cagrad_task_coeffs, task_names, title, extra_series=None, ylabel="Task coefficient"):
+def cagrad_dual_weights_over_epochs_plot(cagrad_dual_weights, task_names, title):
+
+    weights = np.asarray(ready_for_plotting(cagrad_dual_weights))
+
+    plt.figure()
+    for i, name in enumerate(task_names):
+        plt.plot(weights[..., i], label=name)
+    plt.legend()
+    plt.title(title)
+    plt.xlabel("Epoch")
+    plt.ylabel("Dual weight")
+    plt.ylim(-0.05, 1.05)
+    plt.grid(True)
+    plt.tight_layout()
+
+
+def cagrad_task_coeffs_over_epochs_plot(cagrad_task_coeffs, task_names, title):
 
     coeffs = np.asarray(ready_for_plotting(cagrad_task_coeffs))
 
     plt.figure()
     for i, name in enumerate(task_names):
         plt.plot(coeffs[..., i], label=name)
-    if extra_series is not None:
-        for label, series in extra_series.items():
-            plt.plot(np.asarray(ready_for_plotting(series)), label=label, linestyle=":")
     plt.legend()
-    plt.title(f"{title} over epochs")
+    plt.title(title)
     plt.xlabel("Epoch")
-    plt.ylabel(ylabel)
+    plt.ylabel("Gradient multiplier")
     plt.grid(True)
     plt.tight_layout()
 
