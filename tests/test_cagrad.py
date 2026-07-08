@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from models.cagrad import CAGrad
 from models.train import ModelTrainer
 from models.listener_based.llado2025.model import llado2025_grad_surgery
-from models.louspeaker_based.second_moment.model import SecondMoment
+from models.loudspeaker_based.second_moment.model import SecondMoment
 from filter_estimation.model import MultiSourceFIR
 from propagation.model import BinauralFreeFieldPropagation
 from utils.sofa_functions import load_sofa, get_template_for_llado2025_desena_2020

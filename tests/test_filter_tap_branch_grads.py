@@ -6,7 +6,7 @@ from utils.sofa_functions import load_sofa, get_template_for_llado2025_desena_20
 from utils.miscellaneous import load_npy_to_torch
 from models.listener_based.llado2025.model import llado2025_grad_surgery
 from models.listener_based.llado2025.grad_surgery import ItdIldDBranchGradNormFn
-from models.louspeaker_based.second_moment.model import SecondMoment
+from models.loudspeaker_based.second_moment.model import SecondMoment
 from models.train import ModelTrainer
 from filter_estimation.model import MultiSourceFIR
 from propagation.model import BinauralFreeFieldPropagation
