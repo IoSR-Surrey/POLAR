@@ -11,8 +11,15 @@ import numpy as np
 import pytest
 import torch
 
-from utils.miscellaneous import _flatten_tap_grads, create_mtl_optimizer, load_npy_to_torch, ready_for_plotting, target_angle_for_listeners
-from logger.saving import task_grad_pairwise_cosine_similarity_stats
+from utils.miscellaneous import (
+    _flatten_tap_grads,
+    create_mtl_optimizer,
+    load_npy_to_torch,
+    ready_for_plotting,
+    run_mtl_optimizer_step,
+    target_angle_for_listeners,
+)
+from logger.saving import SavingManager, task_grad_pairwise_cosine_similarity_stats
 from models.train import ModelTrainer
 
 
@@ -105,6 +112,71 @@ def test_create_mtl_optimizer_returns_cagrad() -> None:
 
     assert isinstance(mtl, CAGrad)
     assert mtl.task_names == ["_MockModel"]
+
+
+def test_create_mtl_optimizer_returns_gradnorm_cagrad() -> None:
+    from models.cagrad import CAGrad
+    from models.gradnorm import GradNorm
+
+    class _TaskAModel(_MockModel):
+        pass
+
+    class _TaskBModel(_MockModel):
+        pass
+
+    trainer = ModelTrainer([_TaskAModel(), _TaskBModel()], weights=[1.0, 2.0])
+    mtl = create_mtl_optimizer(trainer, "gradnorm+cagrad")
+
+    assert isinstance(mtl, dict)
+    assert isinstance(mtl["gradnorm"], GradNorm)
+    assert isinstance(mtl["cagrad"], CAGrad)
+    assert mtl["gradnorm"].task_names == ["_TaskAModel", "_TaskBModel"]
+    assert mtl["cagrad"].task_names == ["_TaskAModel", "_TaskBModel"]
+
+
+def test_run_mtl_optimizer_step_gradnorm_cagrad_saves_cagrad_diagnostics() -> None:
+    class _TaskAModel(torch.nn.Module):
+        model_type = "listener_based"
+
+        def forward(self, x):
+            return {"output": x.sum(dim=-1), "kwargs": {}}
+
+    class _TaskBModel(torch.nn.Module):
+        model_type = "listener_based"
+
+        def forward(self, x):
+            return {"output": x.sum(dim=-1), "kwargs": {}}
+
+    class _SharedNet(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+
+        def forward(self) -> tuple[torch.Tensor, torch.Tensor]:
+            return self.weight[0] ** 2, (self.weight[1] - 1.0) ** 2
+
+    trainer = ModelTrainer([_TaskAModel(), _TaskBModel()])
+    mtl = create_mtl_optimizer(trainer, "gradnorm+cagrad")
+    net = _SharedNet()
+    optimizer = torch.optim.SGD(net.parameters(), lr=0.1)
+    saving_manager = SavingManager(task_names=list(trainer.model_dict.keys()))
+
+    loss_a, loss_b = net()
+    loss_dict = {
+        "_TaskAModel": loss_a,
+        "_TaskBModel": loss_b,
+        "total": loss_a + loss_b,
+    }
+
+    run_mtl_optimizer_step(
+        "gradnorm+cagrad", mtl, loss_dict, net, optimizer, saving_manager, trainer,
+    )
+
+    assert "effective_grad" in saving_manager.saved_data
+    assert "cagrad_dual_weights" in saving_manager.saved_data
+    assert "cagrad_task_coeffs" in saving_manager.saved_data
+    assert "gradnorm_task_weights" in saving_manager.saved_data
+    assert set(saving_manager.saved_data["raw_grads"][0].keys()) == set(trainer.model_dict.keys())
 
 
 class _MockModel(torch.nn.Module):

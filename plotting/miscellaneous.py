@@ -19,7 +19,7 @@ from plotting.scatter_plots import itd_ild_scatter_plot, itd_ild_scatter_evoluti
 from plotting.spatial_plots import localisation_arrows_plot
 
 
-def ALL_PLOTTING_FUNCTIONS(saving_manager):
+def ALL_PLOTTING_FUNCTIONS(saving_manager, show_plots=False):
 
     with open("config/hyperpameters.json", "r") as f:
         config = json.load(f)
@@ -97,6 +97,7 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager):
         )
         saving_manager.save_new_plots("task_grad_pairwise_cosine_similarity")
 
+    # CAGrad and GradNorm+CAGrad both save a single combined "effective_grad" per epoch.
     if "raw_grads" in saving_manager.saved_data and "effective_grad" in saving_manager.saved_data:
         task_names = list(saving_manager.saved_data["raw_grads"][0].keys())
         raw_grad_norms = [
@@ -105,6 +106,12 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager):
         ]
         loss_grad_norms_over_epochs_plot(raw_grad_norms, "Per-task raw gradient norm", norm_kind="Raw")
         saving_manager.save_new_plots("raw_grad_norms")
+
+        if "gradnorm_task_weights" in saving_manager.saved_data:
+            gradnorm_task_weights_over_epochs_plot(
+                saving_manager.saved_data["gradnorm_task_weights"], task_names, "GradNorm"
+            )
+            saving_manager.save_new_plots("gradnorm_task_weights")
 
         if "cagrad_dual_weights" in saving_manager.saved_data:
             cagrad_dual_weights_over_epochs_plot(
@@ -158,10 +165,12 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager):
         )
         saving_manager.save_new_plots("localisation_arrows")
 
-    
+    if show_plots:
+        create_close_button()
+        plt.show()
+    else:
+        plt.close("all")
 
-    _close_buttons = create_close_button()
-    plt.show()
 
 def listener_labels_from_lstn_pos(lstn_pos):
     lstn_pos = ready_for_plotting(lstn_pos)
@@ -178,7 +187,7 @@ def get_listener_plot_info(saving_manager):
 
 
 def close_all(_event):
-    plt.close('all')
+    plt.close("all")
 
 
 def create_close_button():
@@ -188,7 +197,7 @@ def create_close_button():
         fig.subplots_adjust(bottom=0.12)
         ax_button = fig.add_axes([0.81, 0.02, 0.15, 0.07])
         ax_button.set_zorder(10)
-        button = Button(ax_button, 'Close All Figures')
+        button = Button(ax_button, "Close All Figures")
         button.on_clicked(close_all)
         fig._close_all_button = button
         buttons.append(button)

@@ -49,7 +49,7 @@ class GradNorm(MultiTaskOptimizer):
     def _compute_grad_norm(self, flat_grad):
         return torch.norm(flat_grad)
 
-    def step(self, loss_dict, shared_params, model_optimizer):
+    def step(self, loss_dict, shared_params, model_optimizer, step = True):
         losses = self._task_losses(loss_dict)
 
         if self.initial_losses is None:
@@ -81,10 +81,11 @@ class GradNorm(MultiTaskOptimizer):
         self.weight_optimizer.step()
         self._renormalize_weights()
 
-        model_optimizer.zero_grad()
         total_loss = sum(self.weights[i] * losses[i] for i in range(len(losses)))
-        total_loss.backward()
-        model_optimizer.step()
+        if step:
+            model_optimizer.zero_grad()
+            total_loss.backward()
+            model_optimizer.step()
 
         raw_grads = {name: (flat_grads[i] / old_weights[i]).detach() for i, name in enumerate(self.task_names)}
         effective_grads = {name: (flat_grads[i] * (self.weights[i] / old_weights[i])).detach() for i, name in enumerate(self.task_names)}
