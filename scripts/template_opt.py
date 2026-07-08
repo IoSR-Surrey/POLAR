@@ -104,7 +104,7 @@ for epoch in range(num_epochs):
     spk_filters = filter_estimator(filter_input)
     binaural_signals = propagator(stim, spk_filters)
 
-    model_trainer.compute_estimates(binaural_signals, spk_filters)
+    model_trainer.compute_estimates(binaural_signals, spk_filters, stim)
     loss_dict = model_trainer.compute_loss(targets)
 
     optimizer.zero_grad()
@@ -118,7 +118,7 @@ for epoch in range(num_epochs):
 with torch.no_grad():
     spk_filters = filter_estimator(filter_input)
     binaural_signals = propagator(stim, spk_filters)
-    model_trainer.compute_estimates(binaural_signals, spk_filters)
+    model_trainer.compute_estimates(binaural_signals, spk_filters, stim)
 
 final_estimate = model_trainer.estimates["llado2025_grad_surgery"].item()
 print("--------------------------------")

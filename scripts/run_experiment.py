@@ -194,7 +194,7 @@ def run_experiment(
         spk_filters = filter_estimator(dummy_input)
         binaural_signals = prop(stim, spk_filters)
 
-        model_trainer.compute_estimates(binaural_signals, spk_filters)
+        model_trainer.compute_estimates(binaural_signals, spk_filters, stim)
         loss_dict = model_trainer.compute_loss(targets)
         saving_manager.save("loss_dict", loss_dict)
         saving_manager.save("modelTrainer.estimates", model_trainer.estimates)
@@ -238,7 +238,7 @@ def run_experiment(
         saving_manager.save("localisation_uncertainty", localisation_uncertainty)
     saving_manager.save("spk_filters", spk_filters)
 
-    model_trainer.compute_estimates(binaural_signals, spk_filters)
+    model_trainer.compute_estimates(binaural_signals, spk_filters, stim)
     final_loss_dict = model_trainer.compute_loss(targets)
     summary = _compute_summary_metrics(model_trainer, targets, final_loss_dict, llado_model, desena_model)
     summary.update({

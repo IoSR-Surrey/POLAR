@@ -29,7 +29,7 @@ class desena2020(nn.Module):
         self._set_Hmin()
 
 
-    def forward(self, bin_stim):
+    def forward(self, bin_stim, _):
 
         interauralcues = estimate_interaural_cues(bin_stim, self.gtfb, self.lag_values, self.tau_iacc)
 

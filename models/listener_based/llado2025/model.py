@@ -28,7 +28,7 @@ class llado2025(nn.Module):
         self._create_template(hrirs)
 
 
-    def forward(self, binaural_signals):   
+    def forward(self, binaural_signals, _):   
 
         interauralcues = estimate_interaural_cues(binaural_signals, self.gtfb, self.lag_values, self.tau_iacc)
 
@@ -75,7 +75,7 @@ class llado2025_grad_surgery(nn.Module):
         self._create_template(hrirs)
 
 
-    def forward(self, binaural_signals):   
+    def forward(self, binaural_signals, _):   
 
         interauralcues = self._estimate_interaural_cues(binaural_signals)
 

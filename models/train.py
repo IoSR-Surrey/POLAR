@@ -23,7 +23,7 @@ class ModelTrainer:
     def __init__(self, models, criterions = None, weights=None):
         self.model_dict = create_model_dict(models, criterions, weights)
 
-    def compute_estimates(self, binaural_signals, spk_filters):
+    def compute_estimates(self, binaural_signals, spk_filters, reference_signals):
 
         N_signals = binaural_signals.shape[0]
         N_listeners = binaural_signals.shape[1]
@@ -36,7 +36,7 @@ class ModelTrainer:
         for model_name, model in self.model_dict.items():
             
             if model['model'].model_type == 'listener_based':
-                output = model['model'](binaural_signals)
+                output = model['model'](binaural_signals, reference_signals)
                 self.estimates[model_name] = output['output'].view(N_signals, N_listeners)
                 self.kwargs_output[model_name] = output['kwargs']
             

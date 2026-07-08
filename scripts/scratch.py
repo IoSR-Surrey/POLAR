@@ -20,6 +20,8 @@ from filter_estimation.model import MultiSourceFIR
 from propagation.model import BinauralFreeFieldPropagation
 from models.listener_based.llado2025.model import llado2025_grad_surgery
 from models.listener_based.desena2020.model import desena2020
+from models.listener_based.LSD.model import LSD
+from models.loudspeaker_based.second_moment.model import SecondMoment
 from models.train import ModelTrainer
 from logger.saving import SavingManager
 from plotting.miscellaneous import ALL_PLOTTING_FUNCTIONS
@@ -43,25 +45,29 @@ spk_pos = torch.tensor([[d*torch.cos(torch.deg2rad(torch.tensor(30))), d*torch.s
 
 target_angle = 0.0
 target_position = torch.tensor([d * torch.cos(torch.deg2rad(torch.tensor(target_angle))), d * torch.sin(torch.deg2rad(torch.tensor(target_angle)))])
+target_angles = target_angle_for_listeners(lstn_pos, target_position)
 
 llado_model = llado2025_grad_surgery(48000, hrirs, gtfb)
 desena_model = desena2020(48000, hrirs, gtfb)
+lsd_model = LSD(48000, sofaile, target_angles.unsqueeze(-1))
 
 prop = BinauralFreeFieldPropagation(48000, lstn_pos, spk_pos, sofaile)
 
 n_sources = len(spk_pos)
 n_taps = 32
 nn = MultiSourceFIR(n_taps, n_sources)
-nn.set_filter_initialisation("middle")
+# nn.set_filter_initialisation("middle")
+second_moment = SecondMoment(n_taps, n_sources)
 
 modelTrainer = ModelTrainer(
-    [llado_model, desena_model],
-    weights=[1.0, 1.0],
+    [llado_model, desena_model, second_moment],
+    weights=[1.0, 1.0, 1.0],
 )
+
 targets = {
-    "llado2025_grad_surgery": target_angle_for_listeners(lstn_pos, target_position).unsqueeze(0),
+    "llado2025_grad_surgery": target_angles.unsqueeze(0),
     "desena2020": torch.zeros(1, len(lstn_pos)),
-    # "SecondMoment": torch.zeros(1, n_sources),
+    "SecondMoment": torch.zeros(1, n_sources),
 }
 
 stim = torch.ones(1,1,1)
@@ -92,7 +98,7 @@ for i in range(1000):
 
     binaural_signals = prop(stim, spk_filters)
 
-    modelTrainer.compute_estimates(binaural_signals, spk_filters)
+    modelTrainer.compute_estimates(binaural_signals, spk_filters, stim)
     loss_dict = modelTrainer.compute_loss(targets)
     saving_manager.save("loss_dict", loss_dict)
     saving_manager.save("modelTrainer.estimates", modelTrainer.estimates)
