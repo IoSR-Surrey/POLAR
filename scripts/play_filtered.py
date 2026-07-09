@@ -71,6 +71,43 @@ def build_stimulus_playlist(fs, burst_s, silence_s, seed, audio_tracks_dir):
     return playlist
 
 
+def load_config_folders(config_path):
+    with open(config_path, encoding="utf-8") as f:
+        config = json.load(f)
+    folders = config.get("folders")
+    if folders is None:
+        raise ValueError("Config must contain a 'folders' key.")
+    if isinstance(folders, str):
+        folders = [folders]
+    if not isinstance(folders, list) or not folders:
+        raise ValueError("'folders' must be a non-empty list of paths.")
+    output_dirs = []
+    for folder in folders:
+        path = Path(folder)
+        if not path.is_absolute():
+            path = (ROOT / path).resolve()
+        else:
+            path = path.resolve()
+        if not path.is_dir():
+            raise NotADirectoryError(f"Output directory does not exist: {path}")
+        output_dirs.append(path)
+    return output_dirs
+
+
+def load_filter_sets(output_dirs):
+    filter_sets = []
+    for output_dir in output_dirs:
+        spk_filters = load_spk_filters(output_dir)
+        try:
+            label = str(output_dir.relative_to(ROOT))
+        except ValueError:
+            label = str(output_dir)
+        filter_sets.append((label, spk_filters))
+        n_sources, n_taps = spk_filters.shape
+        print(f"Loaded spk_filters from {output_dir} with shape ({n_sources}, {n_taps})")
+    return filter_sets
+
+
 def load_spk_filters(output_dir):
     filters_path = output_dir / "npy" / "spk_filters.npy"
     if not filters_path.exists():
@@ -201,26 +238,34 @@ class LoopPlayer:
         self.position = 0
 
 
-def run_playback_loop(playlist, spk_filters, fs, device_index):
+def run_playback_loop(playlist, filter_sets, fs, device_index):
     devices = sd.query_devices()
     device_name = devices[device_index]["name"]
 
     pygame.init()
-    screen = pygame.display.set_mode((640, 280))
+    screen = pygame.display.set_mode((720, 360))
     pygame.display.set_caption("Filtered playback")
     font = pygame.font.SysFont(None, 28)
 
+    folder_idx = 0
     source_idx = 0
-    filtered_audio = apply_spk_filters(playlist[source_idx][1], spk_filters)
-    player = LoopPlayer(normalize_for_playback(filtered_audio), fs, device_index)
+
+    def filtered_audio():
+        return apply_spk_filters(playlist[source_idx][1], filter_sets[folder_idx][1])
+
+    player = LoopPlayer(normalize_for_playback(filtered_audio()), fs, device_index)
     player.start()
     n_channels = player.audio.shape[1]
 
     def select_source(new_idx):
-        nonlocal source_idx, filtered_audio
+        nonlocal source_idx
         source_idx = new_idx % len(playlist)
-        filtered_audio = apply_spk_filters(playlist[source_idx][1], spk_filters)
-        player.set_audio(normalize_for_playback(filtered_audio))
+        player.set_audio(normalize_for_playback(filtered_audio()))
+
+    def select_folder(new_idx):
+        nonlocal folder_idx
+        folder_idx = new_idx % len(filter_sets)
+        player.set_audio(normalize_for_playback(filtered_audio()))
 
     running = True
     clock = pygame.time.Clock()
@@ -228,14 +273,17 @@ def run_playback_loop(playlist, spk_filters, fs, device_index):
         screen.fill((25, 25, 25))
         status = "Playing — Space to pause" if player.playing else "Paused — Space to play"
         source_name = playlist[source_idx][0]
+        folder_name = filter_sets[folder_idx][0]
         for i, line in enumerate([
             status,
             f"Source: {source_name} ({source_idx + 1}/{len(playlist)})",
             "Up/Down to change source",
+            f"Filters: {folder_name} ({folder_idx + 1}/{len(filter_sets)})",
+            "Left/Right to change filters",
             f"Device {device_index}: {device_name}",
             f"{n_channels} channels   ESC to quit",
         ]):
-            screen.blit(font.render(line, True, (220, 220, 220)), (20, 24 + 36 * i))
+            screen.blit(font.render(line, True, (220, 220, 220)), (20, 20 + 32 * i))
         pygame.display.flip()
 
         for event in pygame.event.get():
@@ -250,6 +298,10 @@ def run_playback_loop(playlist, spk_filters, fs, device_index):
                     select_source(source_idx - 1)
                 elif event.key == pygame.K_DOWN and not getattr(event, "repeat", 0):
                     select_source(source_idx + 1)
+                elif event.key == pygame.K_LEFT and not getattr(event, "repeat", 0):
+                    select_folder(folder_idx - 1)
+                elif event.key == pygame.K_RIGHT and not getattr(event, "repeat", 0):
+                    select_folder(folder_idx + 1)
 
         clock.tick(30)
 
@@ -261,7 +313,13 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Play pink noise or audio tracks through loudspeakers filtered by saved spk_filters."
     )
-    parser.add_argument("--output-dir", type=Path, required=True, help="Path to an optimisation output run folder.")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=ROOT / "config" / "play_filtered_config.json",
+        help="JSON config with a list of output folders to cycle through.",
+    )
+    parser.add_argument("--output-dir", type=Path, default=None, help="Path to a single optimisation output run folder.")
     parser.add_argument("--fs", type=int, default=48000, help="Sample rate in Hz.")
     parser.add_argument("--burst-s", type=float, default=0.5, help="Pink-noise burst duration in seconds.")
     parser.add_argument("--silence-s", type=float, default=0.5, help="Silence before and after the burst in seconds.")
@@ -270,7 +328,10 @@ def parse_args():
     parser.add_argument("--list-devices", action="store_true", help="List audio devices and exit.")
     parser.add_argument("--save-wav", type=Path, default=None, help="Optional path to save the filtered multi-channel WAV.")
     parser.add_argument("--no-play", action="store_true", help="Skip playback (use with --save-wav).")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.output_dir is None and (args.config is None or not args.config.exists()):
+        parser.error("provide --output-dir or a valid --config file")
+    return args
 
 
 def main():
@@ -280,13 +341,16 @@ def main():
         list_devices()
         return
 
-    output_dir = args.output_dir.resolve()
-    if not output_dir.is_dir():
-        raise NotADirectoryError(f"Output directory does not exist: {output_dir}")
+    if args.output_dir is not None:
+        output_dir = args.output_dir.resolve()
+        if not output_dir.is_dir():
+            raise NotADirectoryError(f"Output directory does not exist: {output_dir}")
+        output_dirs = [output_dir]
+    else:
+        output_dirs = load_config_folders(args.config.resolve())
 
-    spk_filters = load_spk_filters(output_dir)
-    n_sources, n_taps = spk_filters.shape
-    print(f"Loaded spk_filters from {output_dir} with shape ({n_sources}, {n_taps})")
+    filter_sets = load_filter_sets(output_dirs)
+    n_sources = max(spk_filters.shape[0] for _, spk_filters in filter_sets)
 
     playlist = build_stimulus_playlist(
         args.fs, args.burst_s, args.silence_s, args.seed, ROOT / "data" / "audio_tracks"
@@ -294,7 +358,7 @@ def main():
     n_tracks = len(playlist) - 1
     print(f"Loaded {len(playlist)} stimuli (pink noise + {n_tracks} tracks)")
 
-    filtered_audio = apply_spk_filters(playlist[0][1], spk_filters)
+    filtered_audio = apply_spk_filters(playlist[0][1], filter_sets[0][1])
     print(f"Filtered audio shape: {filtered_audio.shape} (samples, channels)")
 
     if args.save_wav is not None:
@@ -305,7 +369,7 @@ def main():
         return
 
     output_device = select_output_device(n_sources, args.device)
-    run_playback_loop(playlist, spk_filters, args.fs, output_device)
+    run_playback_loop(playlist, filter_sets, args.fs, output_device)
 
 
 if __name__ == "__main__":
