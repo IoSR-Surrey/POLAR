@@ -42,13 +42,13 @@ def test_template_has_expected_structure(model: desena2020) -> None:
 
 def test_forward_output_shape_for_batch(model: desena2020) -> None:
     batch = model.hrirs[12:15]
-    output = model(batch)["output"]
+    output = model(batch, None)["output"]
 
     assert output.shape == (3,)
 
 
 def test_forward_returns_expected_kwargs(model: desena2020) -> None:
-    result = model(model.hrirs[18:19])
+    result = model(model.hrirs[18:19], None)
 
     assert set(result.keys()) == {"output", "kwargs"}
     assert set(result["kwargs"].keys()) == {"interauralcues", "itd_ild_distance", "distance"}
@@ -57,7 +57,7 @@ def test_forward_returns_expected_kwargs(model: desena2020) -> None:
 
 
 def test_output_uncertainty_within_unit_interval(model: desena2020) -> None:
-    uncertainty = model(model.hrirs)["output"]
+    uncertainty = model(model.hrirs, None)["output"]
 
     assert torch.all(uncertainty >= 0.0)
     assert torch.all(uncertainty <= 1.0)
@@ -67,15 +67,15 @@ def test_template_hrir_has_lower_uncertainty_than_noise(model: desena2020) -> No
     template_stimulus = model.hrirs[_azimuth_index(0.0) : _azimuth_index(0.0) + 1]
     noise = torch.randn(1, 2, 256) * 0.01
 
-    template_uncertainty = model(template_stimulus)["output"].item()
-    noise_uncertainty = model(noise)["output"].item()
+    template_uncertainty = model(template_stimulus, None)["output"].item()
+    noise_uncertainty = model(noise, None)["output"].item()
 
     assert template_uncertainty < noise_uncertainty
 
 
 def test_loudness_weighting_produces_expected_shapes(model: desena2020) -> None:
     stimulus = model.hrirs[18:19]
-    result = model(stimulus)
+    result = model(stimulus, None)
     distance = result["kwargs"]["distance"]
 
     assert distance["weightedLikelihood"].shape == (1, N_AZIMUTHS)
@@ -85,6 +85,6 @@ def test_loudness_weighting_produces_expected_shapes(model: desena2020) -> None:
 @pytest.mark.parametrize("azimuth_deg", [0.0, -45.0, 45.0])
 def test_template_hrir_uncertainty_below_midpoint(model: desena2020, azimuth_deg: float) -> None:
     idx = _azimuth_index(azimuth_deg)
-    uncertainty = model(model.hrirs[idx : idx + 1])["output"].item()
+    uncertainty = model(model.hrirs[idx : idx + 1], None)["output"].item()
 
     assert uncertainty < 0.5

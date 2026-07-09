@@ -95,7 +95,7 @@ def _symmetric_impulse_binaural_signal() -> torch.Tensor:
 def _impulse_panning_ear_gradients(target_deg: float, grad_surgery: bool) -> tuple[float, float, float]:
     model = make_model(grad_surgery=grad_surgery)
     binaural = _symmetric_impulse_binaural_signal()
-    estimate = model(binaural)["output"]
+    estimate = model(binaural, None)["output"]
     loss = F.mse_loss(estimate, torch.tensor([target_deg], dtype=estimate.dtype))
     loss.backward()
     return (
@@ -116,7 +116,7 @@ def _branch_combined_grad_norm(
 
     model = make_model(grad_surgery=True)
     binaural = torch.ones(1, 2, 1, requires_grad=True)
-    loss = F.mse_loss(model(binaural)["output"], torch.tensor([target_deg], dtype=binaural.dtype))
+    loss = F.mse_loss(model(binaural, None)["output"], torch.tensor([target_deg], dtype=binaural.dtype))
     loss.backward()
     combined = ItdIldDBranchGradNormFn.last_itd_grad + ItdIldDBranchGradNormFn.last_ild_grad
     return torch.norm(combined).item()
@@ -158,7 +158,7 @@ def test_returns_corresponding_template_angle_with_template_hrirs(
     model = make_model(grad_surgery=grad_surgery)
     hrir_stimulus = model.hrirs[_azimuth_index(azimuth_deg) : _azimuth_index(azimuth_deg) + 1]
 
-    estimated = model(hrir_stimulus)["output"]
+    estimated = model(hrir_stimulus, None)["output"]
 
     assert estimated.shape == (1,)
     assert estimated.item() == pytest.approx(azimuth_deg, abs=0.5) # abs = 0.5 due to problems with argmax when there are multiple max values
@@ -184,7 +184,7 @@ def test_forward_output_shape_for_batch(grad_surgery: bool) -> None:
     model = make_model(grad_surgery=grad_surgery)
     batch = model.hrirs[12:15]
 
-    output = model(batch)["output"]
+    output = model(batch, None)["output"]
 
     assert output.shape == (3,)
 
@@ -192,7 +192,7 @@ def test_forward_output_shape_for_batch(grad_surgery: bool) -> None:
 @pytest.mark.parametrize("grad_surgery", MODEL_VARIANTS)
 def test_forward_returns_expected_kwargs(grad_surgery: bool) -> None:
     model = make_model(grad_surgery=grad_surgery)
-    result = model(model.hrirs[18:19])
+    result = model(model.hrirs[18:19], None)
 
     assert set(result.keys()) == {"output", "kwargs"}
     assert set(result["kwargs"].keys()) == {"interauralcues", "itd_ild_distance"}
@@ -207,7 +207,7 @@ def test_forward_returns_expected_kwargs(grad_surgery: bool) -> None:
 @pytest.mark.parametrize("grad_surgery", MODEL_VARIANTS)
 def test_distance_tensors_have_expected_shape(grad_surgery: bool) -> None:
     model = make_model(grad_surgery=grad_surgery)
-    distance = model(model.hrirs[18:19])["kwargs"]["itd_ild_distance"]
+    distance = model(model.hrirs[18:19], None)["kwargs"]["itd_ild_distance"]
 
     assert distance["itd_distance"].shape == (1, N_AZIMUTHS, N_BANDS)
     assert distance["ild_distance"].shape == (1, N_AZIMUTHS, N_BANDS)
@@ -217,7 +217,7 @@ def test_distance_tensors_have_expected_shape(grad_surgery: bool) -> None:
 @pytest.mark.parametrize("grad_surgery", MODEL_VARIANTS)
 def test_azimuth_estimates_within_valid_range(grad_surgery: bool) -> None:
     model = make_model(grad_surgery=grad_surgery)
-    estimates = model(model.hrirs)["output"]
+    estimates = model(model.hrirs, None)["output"]
 
     assert estimates.shape == (N_AZIMUTHS,)
     assert torch.all(estimates >= -90.0)
@@ -227,7 +227,7 @@ def test_azimuth_estimates_within_valid_range(grad_surgery: bool) -> None:
 @pytest.mark.parametrize("grad_surgery", MODEL_VARIANTS)
 def test_template_hrir_estimates_increase_with_azimuth_index(grad_surgery: bool) -> None:
     model = make_model(grad_surgery=grad_surgery)
-    estimates = model(model.hrirs)["output"]
+    estimates = model(model.hrirs, None)["output"]
 
     # Allow small local non-monotonicity from soft-argmax ties at extreme angles.
     assert torch.all(estimates[1:] >= estimates[:-1] - 1.0)
@@ -239,7 +239,7 @@ def test_forward_accepts_variable_input_lengths(grad_surgery: bool, n_samples: i
     model = make_model(grad_surgery=grad_surgery)
     stimulus = torch.ones(1, 2, n_samples)
 
-    output = model(stimulus)["output"]
+    output = model(stimulus, None)["output"]
 
     assert output.shape == (1,)
     assert torch.isfinite(output).all()
@@ -251,8 +251,8 @@ def test_swapping_ears_flips_estimated_azimuth_sign(grad_surgery: bool, azimuth_
     model = make_model(grad_surgery=grad_surgery)
     stimulus = model.hrirs[_azimuth_index(azimuth_deg) : _azimuth_index(azimuth_deg) + 1]
 
-    original = model(stimulus)["output"].item()
-    swapped = model(stimulus[:, [1, 0], :])["output"].item()
+    original = model(stimulus, None)["output"].item()
+    swapped = model(stimulus[:, [1, 0], :], None)["output"].item()
 
     assert original == pytest.approx(azimuth_deg, abs=0.5)
     assert swapped == pytest.approx(-azimuth_deg, abs=0.5)
@@ -267,13 +267,13 @@ def test_one_gradient_descent_step_moves_estimate_toward_target(
     binaural = torch.ones(1, 2, 1, requires_grad=True)
     learning_rate = 0.01
 
-    initial_estimate = model(binaural)["output"].detach().item()
-    loss = F.mse_loss(model(binaural)["output"], torch.tensor([target_deg], dtype=binaural.dtype))
+    initial_estimate = model(binaural, None)["output"].detach().item()
+    loss = F.mse_loss(model(binaural, None)["output"], torch.tensor([target_deg], dtype=binaural.dtype))
     loss.backward()
     with torch.no_grad():
         binaural -= learning_rate * binaural.grad
 
-    updated_estimate = model(binaural)["output"].detach().item()
+    updated_estimate = model(binaural, None)["output"].detach().item()
     initial_error = abs(initial_estimate - target_deg)
     updated_error = abs(updated_estimate - target_deg)
 
@@ -293,8 +293,8 @@ def test_grad_surgery_input_gradients_differ_from_base_when_branch_norm_enabled(
     grad_input = torch.ones(1, 2, 1, requires_grad=True)
     target = torch.tensor([target_deg], dtype=base_input.dtype)
 
-    F.mse_loss(base_model(base_input)["output"], target).backward()
-    F.mse_loss(grad_model(grad_input)["output"], target).backward()
+    F.mse_loss(base_model(base_input, None)["output"], target).backward()
+    F.mse_loss(grad_model(grad_input, None)["output"], target).backward()
 
     assert not torch.allclose(base_input.grad, grad_input.grad)
 
@@ -313,7 +313,7 @@ def test_grad_surgery_itd_and_ild_branches_receive_nonzero_gradients(target_deg:
     model = make_model(grad_surgery=True)
     binaural = torch.ones(1, 2, 1, requires_grad=True)
 
-    F.mse_loss(model(binaural)["output"], torch.tensor([target_deg], dtype=binaural.dtype)).backward()
+    F.mse_loss(model(binaural, None)["output"], torch.tensor([target_deg], dtype=binaural.dtype)).backward()
 
     assert ItdIldDBranchGradNormFn.last_itd_grad is not None
     assert ItdIldDBranchGradNormFn.last_ild_grad is not None
@@ -331,15 +331,15 @@ def test_mini_optimisation_moves_impulse_estimate_toward_target(
     optimizer = torch.optim.Adam(ear_gains.parameters(), lr=0.05)
 
     with torch.no_grad():
-        initial_estimate = model(ear_gains())["output"].item()
+        initial_estimate = model(ear_gains(), None)["output"].item()
 
     for _ in range(20):
         optimizer.zero_grad()
-        loss = F.mse_loss(model(ear_gains())["output"], torch.tensor([target_deg]))
+        loss = F.mse_loss(model(ear_gains(), None)["output"], torch.tensor([target_deg]))
         loss.backward()
         optimizer.step()
 
-    final_estimate = model(ear_gains())["output"].item()
+    final_estimate = model(ear_gains(), None)["output"].item()
     initial_error = abs(initial_estimate - target_deg)
     final_error = abs(final_estimate - target_deg)
 
@@ -357,8 +357,8 @@ def test_grad_surgery_forward_matches_base_model() -> None:
     grad_model = make_model(grad_surgery=True)
     stimulus = base_model.hrirs[18:19]
 
-    base_result = base_model(stimulus)
-    grad_result = grad_model(stimulus)
+    base_result = base_model(stimulus, None)
+    grad_result = grad_model(stimulus, None)
 
     assert torch.allclose(base_result["output"], grad_result["output"])
     assert torch.allclose(
@@ -387,8 +387,8 @@ def test_grad_surgery_input_gradients_match_base_when_branch_norm_disabled(
     grad_input = torch.ones(1, 2, 1, requires_grad=True)
     target = torch.tensor([target_deg], dtype=base_input.dtype)
 
-    base_loss = F.mse_loss(base_model(base_input)["output"], target)
-    grad_loss = F.mse_loss(grad_model(grad_input)["output"], target)
+    base_loss = F.mse_loss(base_model(base_input, None)["output"], target)
+    grad_loss = F.mse_loss(grad_model(grad_input, None)["output"], target)
     base_loss.backward()
     grad_loss.backward()
 
@@ -399,7 +399,7 @@ def test_grad_surgery_backward_flows_to_input() -> None:
     model = make_model(grad_surgery=True)
     stimulus = model.hrirs[18:19].clone().requires_grad_(True)
 
-    model(stimulus)["output"].sum().backward()
+    model(stimulus, None)["output"].sum().backward()
 
     assert stimulus.grad is not None
     assert stimulus.grad.shape == stimulus.shape
@@ -432,7 +432,7 @@ def test_grad_surgery_backward_stores_branch_gradients() -> None:
     model = make_model(grad_surgery=True)
     stimulus = model.hrirs[18:19].clone().requires_grad_(True)
 
-    result = model(stimulus)
+    result = model(stimulus, None)
     cues = result["kwargs"]["interauralcues"]
     result["output"].sum().backward()
 

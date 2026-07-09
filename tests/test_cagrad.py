@@ -138,11 +138,12 @@ def test_cagrad_integration_smoke() -> None:
         "llado2025_grad_surgery": torch.tensor([[15.0]]),
         "SecondMoment": torch.tensor([[0.0, 0.0]]),
     }
+    
 
     for _ in range(3):
         spk_filters = nn(torch.ones(1, 1))
         binaural = prop(torch.ones(1, 1, 1), spk_filters)
-        trainer.compute_estimates(binaural, spk_filters)
+        trainer.compute_estimates(binaural, spk_filters, None)
         loss_dict = trainer.compute_loss(targets)
 
         optimizer.zero_grad()
