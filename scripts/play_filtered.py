@@ -46,6 +46,31 @@ def make_pink_noise_burst(fs, burst_s, silence_s, seed, target_peak=0.1):
     ])
 
 
+def load_mono_wav(path, target_fs):
+    fs, data = wavfile.read(path)
+    audio = np.asarray(data, dtype=np.float64)
+    if audio.ndim == 2:
+        audio = audio.mean(axis=1)
+    if np.issubdtype(data.dtype, np.integer):
+        audio = audio / np.iinfo(data.dtype).max
+    if fs != target_fs:
+        audio = TF.resample(
+            torch.tensor(audio, dtype=torch.float32).unsqueeze(0),
+            fs,
+            target_fs,
+        ).squeeze(0).numpy()
+    return audio
+
+
+def build_stimulus_playlist(fs, burst_s, silence_s, seed, audio_tracks_dir):
+    playlist = [("pink noise", make_pink_noise_burst(fs, burst_s, silence_s, seed))]
+    tracks_dir = Path(audio_tracks_dir)
+    if tracks_dir.is_dir():
+        for path in sorted(tracks_dir.glob("*.wav")):
+            playlist.append((path.stem, load_mono_wav(path, fs)))
+    return playlist
+
+
 def load_spk_filters(output_dir):
     filters_path = output_dir / "npy" / "spk_filters.npy"
     if not filters_path.exists():
@@ -171,27 +196,42 @@ class LoopPlayer:
     def toggle(self):
         self.playing = not self.playing
 
+    def set_audio(self, audio):
+        self.audio = audio
+        self.position = 0
 
-def run_playback_loop(audio, fs, device_index):
+
+def run_playback_loop(playlist, spk_filters, fs, device_index):
     devices = sd.query_devices()
     device_name = devices[device_index]["name"]
 
     pygame.init()
-    screen = pygame.display.set_mode((640, 200))
-    pygame.display.set_caption("Filtered pink-noise burst")
+    screen = pygame.display.set_mode((640, 280))
+    pygame.display.set_caption("Filtered playback")
     font = pygame.font.SysFont(None, 28)
 
-    player = LoopPlayer(normalize_for_playback(audio), fs, device_index)
+    source_idx = 0
+    filtered_audio = apply_spk_filters(playlist[source_idx][1], spk_filters)
+    player = LoopPlayer(normalize_for_playback(filtered_audio), fs, device_index)
     player.start()
     n_channels = player.audio.shape[1]
+
+    def select_source(new_idx):
+        nonlocal source_idx, filtered_audio
+        source_idx = new_idx % len(playlist)
+        filtered_audio = apply_spk_filters(playlist[source_idx][1], spk_filters)
+        player.set_audio(normalize_for_playback(filtered_audio))
 
     running = True
     clock = pygame.time.Clock()
     while running:
         screen.fill((25, 25, 25))
         status = "Playing — Space to pause" if player.playing else "Paused — Space to play"
+        source_name = playlist[source_idx][0]
         for i, line in enumerate([
             status,
+            f"Source: {source_name} ({source_idx + 1}/{len(playlist)})",
+            "Up/Down to change source",
             f"Device {device_index}: {device_name}",
             f"{n_channels} channels   ESC to quit",
         ]):
@@ -206,6 +246,10 @@ def run_playback_loop(audio, fs, device_index):
                     running = False
                 elif event.key == pygame.K_SPACE and not getattr(event, "repeat", 0):
                     player.toggle()
+                elif event.key == pygame.K_UP and not getattr(event, "repeat", 0):
+                    select_source(source_idx - 1)
+                elif event.key == pygame.K_DOWN and not getattr(event, "repeat", 0):
+                    select_source(source_idx + 1)
 
         clock.tick(30)
 
@@ -215,7 +259,7 @@ def run_playback_loop(audio, fs, device_index):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Play a pink-noise burst through loudspeakers filtered by saved spk_filters."
+        description="Play pink noise or audio tracks through loudspeakers filtered by saved spk_filters."
     )
     parser.add_argument("--output-dir", type=Path, required=True, help="Path to an optimisation output run folder.")
     parser.add_argument("--fs", type=int, default=48000, help="Sample rate in Hz.")
@@ -244,8 +288,13 @@ def main():
     n_sources, n_taps = spk_filters.shape
     print(f"Loaded spk_filters from {output_dir} with shape ({n_sources}, {n_taps})")
 
-    stimulus = make_pink_noise_burst(args.fs, args.burst_s, args.silence_s, args.seed)
-    filtered_audio = apply_spk_filters(stimulus, spk_filters)
+    playlist = build_stimulus_playlist(
+        args.fs, args.burst_s, args.silence_s, args.seed, ROOT / "data" / "audio_tracks"
+    )
+    n_tracks = len(playlist) - 1
+    print(f"Loaded {len(playlist)} stimuli (pink noise + {n_tracks} tracks)")
+
+    filtered_audio = apply_spk_filters(playlist[0][1], spk_filters)
     print(f"Filtered audio shape: {filtered_audio.shape} (samples, channels)")
 
     if args.save_wav is not None:
@@ -256,7 +305,7 @@ def main():
         return
 
     output_device = select_output_device(n_sources, args.device)
-    run_playback_loop(filtered_audio, args.fs, output_device)
+    run_playback_loop(playlist, spk_filters, args.fs, output_device)
 
 
 if __name__ == "__main__":
