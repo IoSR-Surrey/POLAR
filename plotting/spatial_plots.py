@@ -1,10 +1,11 @@
 import matplotlib.pyplot as plt
+from matplotlib import cm, colors
 import numpy as np
 
 from utils.miscellaneous import ready_for_plotting
 
 
-def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty, target_angle=None, listener_labels=None, max_arrow_length=1.2):
+def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty, lsd, target_angle=None, listener_labels=None, max_arrow_length=1.2, lsd_vmax=None):
 
     lstn_pos = ready_for_plotting(lstn_pos)
     spk_pos = ready_for_plotting(spk_pos)
@@ -24,6 +25,18 @@ def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty
     arrow_head_len = 0.14
     arrow_width = 2
 
+    lsd = np.squeeze(ready_for_plotting(lsd))
+    lsd = np.atleast_1d(lsd)
+    has_lsd = not np.all(np.isinf(lsd))
+
+    if has_lsd:
+        lsd_norm = colors.Normalize(vmin=0.0, vmax=float(lsd_vmax if lsd_vmax is not None else max(lsd.max(), 1e-3)))
+        lsd_cmap = colors.LinearSegmentedColormap.from_list(
+            "green_red", [(0, 1, 0), (0.8, 0.4, 0), (0.8, 0, 0)]
+        )
+        lsd_sm = cm.ScalarMappable(cmap=lsd_cmap, norm=lsd_norm)
+        lsd_sm.set_array([])
+
     # Broadcast target_angle to one azimuth per listener (per-listener target
     # direction, drawn as a dashed ray emanating from each listener).
     if target_angle is not None:
@@ -37,10 +50,14 @@ def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty
         length = (1.0 - unc) * max_arrow_length
         dx = length * np.cos(np.deg2rad(angle))
         dy = length * np.sin(np.deg2rad(angle))
+        if has_lsd:
+            arrow_color = lsd_cmap(lsd_norm(max(lsd[i], 0.0)))
+        else:
+            arrow_color = 'blue'
         ax.arrow(
             float(x), float(y), float(dx), float(dy),
             head_width=arrow_head_width, head_length=arrow_head_len,
-            fc='blue', ec='blue', linewidth=arrow_width, zorder=2,
+            fc=arrow_color, ec=arrow_color, linewidth=arrow_width, zorder=2,
         )
         arrow_tips_x.append(x + dx)
         arrow_tips_y.append(y + dy)
@@ -70,4 +87,6 @@ def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty
     ax.set_title('Estimated localisation')
     ax.grid(True, zorder=0)
     ax.legend()
+    if has_lsd:
+        fig.colorbar(lsd_sm, ax=ax, label='LSD')
     fig.tight_layout()

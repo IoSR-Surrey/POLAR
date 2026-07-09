@@ -16,6 +16,7 @@ from filter_estimation.model import MultiSourceFIR
 from propagation.model import BinauralFreeFieldPropagation
 from models.listener_based.llado2025.model import llado2025_grad_surgery
 from models.listener_based.desena2020.model import desena2020
+from models.listener_based.LSD.model import LSD
 from models.loudspeaker_based.second_moment.model import SecondMoment
 from models.train import ModelTrainer
 from logger.saving import SavingManager
@@ -25,7 +26,8 @@ from logger.printing import print_loss_and_estimates
 LOSS_SETS = {
     "llado_only": ["llado2025_grad_surgery"],
     "llado_desena": ["llado2025_grad_surgery", "desena2020"],
-    "llado_desena_second": ["llado2025_grad_surgery", "desena2020", "SecondMoment"],
+    "llado_desena_lsd": ["llado2025_grad_surgery", "desena2020", "LSD"],
+    "llado_desena_lsd_second": ["llado2025_grad_surgery", "desena2020", "LSD", "SecondMoment"],
 }
 
 
@@ -35,7 +37,7 @@ def _resolve_sofa_path(sofa_path):
     return sofa_path
 
 
-def _build_models(loss_set, fs, hrirs, gtfb, n_taps, n_sources, device, dtype):
+def _build_models(loss_set, fs, hrirs, gtfb, n_taps, n_sources, device, dtype, sofaile, target_angles):
     llado_model = llado2025_grad_surgery(fs, hrirs, gtfb, device=device, dtype=dtype)
     models = []
     for model_name in LOSS_SETS[loss_set]:
@@ -43,6 +45,8 @@ def _build_models(loss_set, fs, hrirs, gtfb, n_taps, n_sources, device, dtype):
             models.append(llado_model)
         elif model_name == "desena2020":
             models.append(desena2020(fs, hrirs, gtfb, device=device, dtype=dtype))
+        elif model_name == "LSD":
+            models.append(LSD(fs, sofaile, target_angles.unsqueeze(-1), device=device, dtype=dtype))
         elif model_name == "SecondMoment":
             models.append(SecondMoment(n_taps, n_sources, device=device, dtype=dtype))
     return models, llado_model
@@ -54,6 +58,8 @@ def _build_targets(loss_set, lstn_pos, target_position, n_sources, dtype, device
     }
     if "desena2020" in LOSS_SETS[loss_set]:
         targets["desena2020"] = torch.zeros(1, len(lstn_pos), dtype=dtype, device=device)
+    if "LSD" in LOSS_SETS[loss_set]:
+        targets["LSD"] = torch.zeros(1, len(lstn_pos), dtype=dtype, device=device)
     if "SecondMoment" in LOSS_SETS[loss_set]:
         targets["SecondMoment"] = torch.zeros(1, n_sources, dtype=dtype, device=device)
     return targets
@@ -75,6 +81,12 @@ def _compute_summary_metrics(model_trainer, targets, loss_dict, llado_model, des
         metrics["final_desena_uncertainty_mean"] = float(desena_estimates.mean().detach().cpu().item())
     else:
         metrics["final_desena_uncertainty_mean"] = None
+
+    if "LSD" in model_trainer.estimates:
+        lsd = model_trainer.estimates["LSD"]
+        metrics["final_lsd_mean"] = float(lsd.mean().detach().cpu().item())
+    else:
+        metrics["final_lsd_mean"] = None
 
     if "SecondMoment" in model_trainer.estimates:
         second_moment = model_trainer.estimates["SecondMoment"]
@@ -141,8 +153,12 @@ def run_experiment(
 
     n_sources = len(spk_pos)
     n_taps = filter_config["n_samples"]
-    models, llado_model = _build_models(loss_set, fs, hrirs, gtfb, n_taps, n_sources, device, dtype)
+    target_angles = target_angle_for_listeners(lstn_pos, target_position)
+    models, llado_model = _build_models(
+        loss_set, fs, hrirs, gtfb, n_taps, n_sources, device, dtype, sofaile, target_angles
+    )
     desena_model = next((m for m in models if m.__class__.__name__ == "desena2020"), None)
+    lsd_model = next((m for m in models if isinstance(m, LSD)), None)
 
     prop = BinauralFreeFieldPropagation(fs, lstn_pos, spk_pos, sofaile, device=device, dtype=dtype)
     filter_estimator = MultiSourceFIR(n_taps, n_sources)
@@ -218,6 +234,8 @@ def run_experiment(
             if "llado2025_grad_surgery" in loss_dict else None,
             "desena_loss": float(loss_dict["desena2020"].detach().cpu().item())
             if "desena2020" in loss_dict else None,
+            "lsd_loss": float(loss_dict["LSD"].detach().cpu().item())
+            if "LSD" in loss_dict else None,
             "second_moment_loss": float(loss_dict["SecondMoment"].detach().cpu().item())
             if "SecondMoment" in loss_dict else None,
         })
@@ -226,16 +244,20 @@ def run_experiment(
         spk_filters = filter_estimator(dummy_input)
         binaural_signals = prop(stim, spk_filters)
         binaural_signals_flat = binaural_signals.view(binaural_signals.shape[0] * binaural_signals.shape[1], 2, -1)
-        localisation_angles = llado_model(binaural_signals_flat)["output"]
+        localisation_angles = llado_model(binaural_signals_flat, stim)["output"]
         if desena_model is not None:
-            localisation_uncertainty = desena_model(binaural_signals_flat)["output"]
+            localisation_uncertainty = desena_model(binaural_signals_flat, stim)["output"]
         else:
-            localisation_uncertainty = None
+            localisation_uncertainty = torch.zeros_like(localisation_angles)
+        if lsd_model is not None:
+            lsd = lsd_model(binaural_signals_flat, stim)["output"]
+        else:
+            lsd = torch.full_like(localisation_angles, float("inf"))
 
     saving_manager.save("binaural_signals", binaural_signals_flat)
     saving_manager.save("localisation_angles", localisation_angles)
-    if localisation_uncertainty is not None:
-        saving_manager.save("localisation_uncertainty", localisation_uncertainty)
+    saving_manager.save("localisation_uncertainty", localisation_uncertainty)
+    saving_manager.save("lsd", lsd)
     saving_manager.save("spk_filters", spk_filters)
 
     model_trainer.compute_estimates(binaural_signals, spk_filters, stim)

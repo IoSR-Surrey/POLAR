@@ -147,7 +147,7 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager, show_plots=False):
         saving_manager.save_new_plots("raw_vs_cagrad_cosine_similarity")
 
 
-    if all(key in saving_manager.saved_data for key in ("lstn_pos", "spk_pos", "localisation_angles", "localisation_uncertainty")):
+    if all(key in saving_manager.saved_data for key in ("lstn_pos", "spk_pos", "localisation_angles")):
         lstn_pos = saving_manager.saved_data["lstn_pos"][0]
         if "target_position" in saving_manager.saved_data:
             target_angle = ready_for_plotting(
@@ -155,13 +155,23 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager, show_plots=False):
             )
         else:
             target_angle = saving_manager.saved_data["target_angle"][0]
+        if "localisation_uncertainty" in saving_manager.saved_data:
+            uncertainty = saving_manager.saved_data["localisation_uncertainty"][0]
+        else:
+            uncertainty = torch.zeros_like(saving_manager.saved_data["localisation_angles"][0])
+        if "lsd" in saving_manager.saved_data:
+            lsd = saving_manager.saved_data["lsd"][0]
+        else:
+            lsd = torch.full_like(saving_manager.saved_data["localisation_angles"][0], float("inf"))        
         localisation_arrows_plot(
             lstn_pos,
             saving_manager.saved_data["spk_pos"][0],
             saving_manager.saved_data["localisation_angles"][0],
-            saving_manager.saved_data["localisation_uncertainty"][0],
+            uncertainty,
+            lsd=lsd,
             target_angle=target_angle,
             listener_labels=listener_labels,
+            
         )
         saving_manager.save_new_plots("localisation_arrows")
 

@@ -15,9 +15,10 @@ from utils.seed import set_seed
 from scripts.run_experiment import run_experiment
 from plotting.ablation_summary import plot_ablation_summary
 
-MTL_OPTIMIZERS = ["plain", "gradnorm", "cagrad"]
-LEARNING_RATES = [0.001, 0.005, 0.01, 0.05]
-LOSS_SETS = ["llado_only", "llado_desena", "llado_desena_second"]
+MTL_OPTIMIZERS = ["plain", "gradnorm", "cagrad", "gradnorm+cagrad"]
+LEARNING_RATES = [0.01, 0.05, 0.1, 0.2]
+LOSS_SETS = ["llado_only", "llado_desena", "llado_desena_lsd", "llado_desena_lsd_second"]
+NUM_EPOCHS = 1000
 
 SUMMARY_FIELDS = [
     "run_id",
@@ -28,6 +29,7 @@ SUMMARY_FIELDS = [
     "output_dir",
     "final_angle_error_mean",
     "final_desena_uncertainty_mean",
+    "final_lsd_mean",
     "final_second_moment_mean",
     "final_total_loss",
     "error",
@@ -60,6 +62,7 @@ def _summary_row(run_id, result):
         "output_dir": result.get("output_dir"),
         "final_angle_error_mean": result.get("final_angle_error_mean"),
         "final_desena_uncertainty_mean": result.get("final_desena_uncertainty_mean"),
+        "final_lsd_mean": result.get("final_lsd_mean"),
         "final_second_moment_mean": result.get("final_second_moment_mean"),
         "final_total_loss": result.get("final_total_loss"),
         "error": result.get("error"),
@@ -110,6 +113,7 @@ def main():
                 use_tensorboard=False,
                 run_plots=not args.no_plots,
                 config_path=args.config,
+                training_config_override={"num_epochs": NUM_EPOCHS},
             )
             result["run_id"] = run_id
             all_results.append(result)
@@ -124,6 +128,7 @@ def main():
                 "output_dir": None,
                 "final_angle_error_mean": None,
                 "final_desena_uncertainty_mean": None,
+                "final_lsd_mean": None,
                 "final_second_moment_mean": None,
                 "final_total_loss": None,
                 "error": traceback.format_exc(),

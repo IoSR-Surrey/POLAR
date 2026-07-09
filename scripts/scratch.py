@@ -60,13 +60,14 @@ nn = MultiSourceFIR(n_taps, n_sources)
 second_moment = SecondMoment(n_taps, n_sources)
 
 modelTrainer = ModelTrainer(
-    [llado_model, desena_model, second_moment],
-    weights=[1.0, 1.0, 1.0],
+    [llado_model, desena_model, lsd_model, second_moment],
+    weights=[1.0, 1.0, 1.0, 1.0],
 )
 
 targets = {
     "llado2025_grad_surgery": target_angles.unsqueeze(0),
     "desena2020": torch.zeros(1, len(lstn_pos)),
+    "LSD": torch.zeros(1, len(lstn_pos)),
     "SecondMoment": torch.zeros(1, n_sources),
 }
 
@@ -118,16 +119,18 @@ with torch.no_grad():
     binaural_signals = binaural_signals.view(
         binaural_signals.shape[0] * binaural_signals.shape[1], 2, -1
     )
-    localisation_angles = llado_model(binaural_signals)["output"]
-    localisation_uncertainty = desena_model(binaural_signals)["output"]
+    localisation_angles = llado_model(binaural_signals, stim)["output"]
+    localisation_uncertainty = desena_model(binaural_signals, stim)["output"]
+    lsd = lsd_model(binaural_signals, stim)["output"]
 
 saving_manager.save("binaural_signals", binaural_signals)
 saving_manager.save("localisation_angles", localisation_angles)
 saving_manager.save("localisation_uncertainty", localisation_uncertainty)
+saving_manager.save("lsd", lsd)
 saving_manager.save("spk_filters", spk_filters)
 
 saving_manager.export_to_disk()
 print(f"Saved outputs to {saving_manager.output_dir}")
 
-ALL_PLOTTING_FUNCTIONS(saving_manager)
+ALL_PLOTTING_FUNCTIONS(saving_manager, show_plots=True)
 saving_manager.close()

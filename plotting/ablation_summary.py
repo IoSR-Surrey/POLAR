@@ -20,6 +20,7 @@ def _load_summary_rows(summary_path):
                 "lr",
                 "final_angle_error_mean",
                 "final_desena_uncertainty_mean",
+                "final_lsd_mean",
                 "final_second_moment_mean",
                 "final_total_loss",
             ):
@@ -130,10 +131,11 @@ def _plot_loss_curves(output_root, plot_dir):
     with open(summary_json_path, "r", encoding="utf-8") as f:
         results = json.load(f)
 
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4), squeeze=False)
+    fig, axes = plt.subplots(1, 4, figsize=(18, 4), squeeze=False)
     loss_keys = [
         ("llado_loss", "Llado loss"),
         ("desena_loss", "Desena loss"),
+        ("lsd_loss", "LSD loss"),
         ("second_moment_loss", "Second moment loss"),
     ]
 
