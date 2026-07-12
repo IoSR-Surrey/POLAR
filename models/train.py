@@ -37,7 +37,10 @@ class ModelTrainer:
             
             if model['model'].model_type == 'listener_based':
                 output = model['model'](binaural_signals, reference_signals)
-                self.estimates[model_name] = output['output'].view(N_signals, N_listeners)
+                # Reshape output: (N_signals*N_listeners, ...) -> (N_signals, N_listeners, ...)
+                out_tensor = output['output']
+                remaining_dims = out_tensor.shape[1:]
+                self.estimates[model_name] = out_tensor.view(N_signals, N_listeners, *remaining_dims)
                 self.kwargs_output[model_name] = output['kwargs']
             
             elif model['model'].model_type == 'loudspeaker_based':
