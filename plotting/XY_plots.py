@@ -94,6 +94,13 @@ def plot_loss_and_estimates(loss_dict, estimates, title, n_listeners=None, liste
         losses = np.squeeze(ready_for_plotting([loss_dict[epoch][key] for epoch in range(n_epochs)]))
         model_estimates = np.asarray(ready_for_plotting([estimates[epoch][key] for epoch in range(n_epochs)]))
 
+        # Squeeze out singleton dimensions before checking shape
+        model_estimates = np.squeeze(model_estimates)
+
+        # Skip plotting estimates for high-dimensional outputs (e.g., CueMatchingModel)
+        if model_estimates.ndim > 2:
+            continue
+
         n_series = model_estimates.shape[-1]
         if n_listeners is not None and n_series == n_listeners:
             series_labels = listener_labels or [f"VL {i}" for i in range(n_listeners)]
@@ -133,6 +140,24 @@ def plot_loss_and_estimates(loss_dict, estimates, title, n_listeners=None, liste
         plt.ylabel("Loss")
         plt.grid(True)
         plt.tight_layout()
+
+
+def loss_over_epochs_plot(loss_dict, title="Loss over epochs"):
+    """Simple loss-over-epochs plot for all tasks."""
+
+    n_epochs = len(loss_dict)
+    keys = list(loss_dict[0].keys())
+
+    plt.figure()
+    for key in keys:
+        losses = np.squeeze(ready_for_plotting([loss_dict[epoch][key] for epoch in range(n_epochs)]))
+        plt.plot(losses, label=key)
+    plt.legend()
+    plt.title(title)
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.grid(True)
+    plt.tight_layout()
 
 
 def loss_grad_norms_over_epochs_plot(loss_grad_norms, title, norm_kind="Effective"):
@@ -255,4 +280,72 @@ def gradnorm_task_weights_over_epochs_plot(gradnorm_task_weights, task_names, ti
     plt.xlabel("Epoch")
     plt.ylabel("Task weight")
     plt.grid(True)
+    plt.tight_layout()
+
+
+def iacc_over_epochs_plot(iacc, listener_labels=None):
+    """Plot Interaural Cross-Correlation Coefficient (IACC) over epochs."""
+    iacc = np.asarray(ready_for_plotting(iacc))
+
+    # Shape: (n_epochs, n_listeners) or (n_epochs,) if single listener
+    if iacc.ndim == 1:
+        iacc = iacc[:, np.newaxis]
+
+    n_listeners = iacc.shape[-1]
+    if listener_labels is None:
+        listener_labels = [f"VL {i}" for i in range(n_listeners)]
+
+    plt.figure()
+    for i in range(n_listeners):
+        plt.plot(iacc[:, i], label=listener_labels[i])
+    plt.title("Interaural Cross-Correlation (IACC) Over Epochs")
+    plt.xlabel("Epoch")
+    plt.ylabel("IACC")
+    plt.ylim(-1.05, 1.05)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+
+
+def ear_signals_magnitude_phase_plot(binaural_signals, fs=48000, nfft=2048, listener_labels=None):
+    """Plot magnitude and phase of the ear signals for each virtual listener."""
+    binaural_signals = ready_for_plotting(binaural_signals)
+
+    # Expected shape: (n_listeners, 2, signal_length) where 2 = [left, right]
+    if binaural_signals.ndim == 2:
+        binaural_signals = binaural_signals[np.newaxis, ...]
+    n_listeners = binaural_signals.shape[0]
+
+    if listener_labels is None:
+        listener_labels = [f"VL {i}" for i in range(n_listeners)]
+
+    freq_axis = np.fft.rfftfreq(nfft, 1 / fs)
+
+    fig, axes = plt.subplots(n_listeners, 2, figsize=(12, 3 * n_listeners), squeeze=False)
+
+    for i in range(n_listeners):
+        left_fft = np.fft.rfft(binaural_signals[i, 0, :], n=nfft)
+        right_fft = np.fft.rfft(binaural_signals[i, 1, :], n=nfft)
+
+        left_mag = 20 * np.log10(np.abs(left_fft) + 1e-10)
+        right_mag = 20 * np.log10(np.abs(right_fft) + 1e-10)
+        left_phase = np.unwrap(np.angle(left_fft))
+        right_phase = np.unwrap(np.angle(right_fft))
+
+        axes[i, 0].semilogx(freq_axis, left_mag, label="Left")
+        axes[i, 0].semilogx(freq_axis, right_mag, label="Right")
+        axes[i, 0].set_title(f"{listener_labels[i]} - Magnitude")
+        axes[i, 0].set_xlabel("Frequency (Hz)")
+        axes[i, 0].set_ylabel("Magnitude (dB)")
+        axes[i, 0].legend()
+        axes[i, 0].grid(True)
+
+        axes[i, 1].semilogx(freq_axis, left_phase, label="Left")
+        axes[i, 1].semilogx(freq_axis, right_phase, label="Right")
+        axes[i, 1].set_title(f"{listener_labels[i]} - Phase")
+        axes[i, 1].set_xlabel("Frequency (Hz)")
+        axes[i, 1].set_ylabel("Phase (rad)")
+        axes[i, 1].legend()
+        axes[i, 1].grid(True)
+
     plt.tight_layout()

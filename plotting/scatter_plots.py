@@ -122,9 +122,54 @@ def itd_ild_scatter_plot(estimated_itd, estimated_ild, sofaile, target_angle, gt
     _add_critical_band_colorbar(fig, estimated_scatter, axes[:n_listeners])
 
 
+def cue_matching_itd_ild_scatter_plot(estimated_itd, estimated_ild, target_cues, n_listeners=1, listener_labels=None):
+    """ITD/ILD scatter plot for CueMatchingModel with per-listener target cues."""
+
+    listener_cues = split_interaural_cues_by_listener(estimated_itd, estimated_ild, n_listeners)
+    if listener_labels is None:
+        listener_labels = [f"VL {i}" for i in range(n_listeners)]
+
+    # target_cues shape: (N_listeners, 2, N_banks) where dim 1: 0=ITD, 1=ILD
+    target_cues = ready_for_plotting(target_cues)
+
+    if n_listeners == 1:
+        fig, ax = plt.subplots()
+        cues_itd, cues_ild = listener_cues[0]
+        target_itd = target_cues[0, 0, :].ravel()
+        target_ild = target_cues[0, 1, :].ravel()
+        estimated_scatter = _scatter_itd_ild_from_arrays(
+            ax, np.ravel(cues_itd), np.ravel(cues_ild), target_itd, target_ild,
+            f'ITD-ILD Scatter Plot (Cue Matching)',
+        )
+        fig.tight_layout()
+        _add_critical_band_colorbar(fig, estimated_scatter, ax)
+        return
+
+    n_cols = int(np.ceil(np.sqrt(n_listeners)))
+    n_rows = int(np.ceil(n_listeners / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows), squeeze=False)
+    axes = axes.ravel()
+
+    estimated_scatter = None
+    for listener_idx, (cues_itd, cues_ild) in enumerate(listener_cues):
+        target_itd = target_cues[listener_idx, 0, :].ravel()
+        target_ild = target_cues[listener_idx, 1, :].ravel()
+        estimated_scatter = _scatter_itd_ild_from_arrays(
+            axes[listener_idx], np.ravel(cues_itd), np.ravel(cues_ild), target_itd, target_ild,
+            f'{listener_labels[listener_idx]}',
+        )
+
+    for j in range(n_listeners, len(axes)):
+        axes[j].axis('off')
+
+    fig.suptitle('ITD-ILD Scatter Plot (Cue Matching)')
+    fig.tight_layout(rect=[0, 0, 0.95, 0.96])
+    _add_critical_band_colorbar(fig, estimated_scatter, axes[:n_listeners])
+
+
 def itd_ild_scatter_evolution_gif(saving_manager, n_listeners, listener_labels=None, frame_stride=1, fps=16):
 
-    interaural_cues_series = saving_manager.saved_data["interaural_cues"]
+    interaural_cues_series = saving_manager.saved_data["llado2025_grad_surgery_cues"]
     if len(interaural_cues_series) <= 1:
         return
 

@@ -52,3 +52,97 @@ def rms(x, dim=-1):
 
 def cosine_similarity(a, b):
     return torch.dot(a, b) / (torch.norm(a) * torch.norm(b))
+
+
+def magnitude_squared_coherence(x, y, nperseg=None):
+    """
+    Magnitude-squared coherence via Welch averaging over segments.
+
+    Cxy(f) = |Pxy(f)|^2 / (Pxx(f) * Pyy(f))
+
+    Single-segment MSC is identically 1; averaging across overlapped
+    windowed segments is required for a meaningful estimate.
+
+    Args:
+        x: Signal 1, shape (..., N)
+        y: Signal 2, shape (..., N)
+        nperseg: Segment length (default: min(256, N // 4), at least 8)
+
+    Returns:
+        coherence: Coherence spectrum, shape (..., nperseg//2+1)
+        mean_coherence: Mean over frequency, shape (...)
+    """
+    N = x.shape[-1]
+    if nperseg is None:
+        nperseg = min(256, max(8, N // 4))
+    nperseg = min(nperseg, N)
+    noverlap = nperseg // 2
+    step = nperseg - noverlap
+
+    window = torch.hann_window(nperseg, device=x.device, dtype=x.dtype)
+    # Number of segments that fit with the chosen hop
+    n_segments = 1 + (N - nperseg) // step
+
+    # Gather segments: (..., n_segments, nperseg)
+    starts = torch.arange(n_segments, device=x.device) * step
+    idx = starts.unsqueeze(-1) + torch.arange(nperseg, device=x.device)
+    x_segs = x[..., idx] * window
+    y_segs = y[..., idx] * window
+
+    X = torch.fft.rfft(x_segs, dim=-1)
+    Y = torch.fft.rfft(y_segs, dim=-1)
+
+    Pxx = (X * torch.conj(X)).real.mean(dim=-2)
+    Pyy = (Y * torch.conj(Y)).real.mean(dim=-2)
+    Pxy = (X * torch.conj(Y)).mean(dim=-2)
+
+    coherence = torch.abs(Pxy) ** 2 / (Pxx * Pyy).clamp(min=1e-10)
+    mean_coherence = coherence.mean(dim=-1)
+    return coherence, mean_coherence
+
+
+def interaural_cross_correlation(left, right, max_lag_samples=None):
+    """
+    Compute the Interaural Cross-Correlation Coefficient (IACC).
+    
+    IACC is the maximum of the normalized cross-correlation between
+    left and right ear signals within a specified lag range.
+    
+    Args:
+        left: Left ear signal, shape (..., N)
+        right: Right ear signal, shape (..., N)
+        max_lag_samples: Maximum lag to search (default: N // 4)
+    
+    Returns:
+        iacc: Maximum cross-correlation value in [-1, 1], shape (...)
+        iacc_lag: Lag (in samples) at which maximum occurs, shape (...)
+    """
+    N = left.shape[-1]
+    if max_lag_samples is None:
+        max_lag_samples = N // 4
+
+    left_norm = left - left.mean(dim=-1, keepdim=True)
+    right_norm = right - right.mean(dim=-1, keepdim=True)
+
+    left_std = left_norm.pow(2).sum(dim=-1, keepdim=True).sqrt().clamp(min=1e-10)
+    right_std = right_norm.pow(2).sum(dim=-1, keepdim=True).sqrt().clamp(min=1e-10)
+
+    nfft = 2 * N - 1
+    L = torch.fft.rfft(left_norm, n=nfft, dim=-1)
+    R = torch.fft.rfft(right_norm, n=nfft, dim=-1)
+
+    cross_corr = torch.fft.irfft(L * torch.conj(R), n=nfft, dim=-1)
+    cross_corr = cross_corr / (left_std * right_std)
+
+    # Extract lags within [-max_lag_samples, +max_lag_samples]
+    # Cross-correlation output: [0, 1, ..., N-1, -(N-1), ..., -1]
+    pos_lags = cross_corr[..., :max_lag_samples + 1]
+    neg_lags = cross_corr[..., -(max_lag_samples):]
+    relevant_corr = torch.cat([neg_lags, pos_lags], dim=-1)
+
+    iacc, max_idx = relevant_corr.abs().max(dim=-1)
+    iacc_lag = max_idx - max_lag_samples
+
+    iacc_signed = torch.gather(relevant_corr, -1, max_idx.unsqueeze(-1)).squeeze(-1)
+
+    return iacc_signed, iacc_lag
