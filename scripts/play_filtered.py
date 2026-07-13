@@ -94,17 +94,92 @@ def load_config_folders(config_path):
     return output_dirs
 
 
+def validate_n_sources(n_sources):
+    if n_sources not in (2, 4):
+        raise ValueError(f"Expected 2 or 4 loudspeakers, got {n_sources}.")
+
+
+def load_spk_pos(output_dir, n_sources):
+    pos_path = output_dir / "npy" / "spk_pos.npy"
+    if not pos_path.exists():
+        return None
+    spk_pos = np.load(pos_path)
+    if spk_pos.ndim == 1:
+        spk_pos = spk_pos.reshape(-1, 2)
+    if spk_pos.shape[0] != n_sources:
+        raise ValueError(
+            f"spk_pos has {spk_pos.shape[0]} speakers but spk_filters has {n_sources}."
+        )
+    return spk_pos
+
+
+def setup_description(n_sources, spk_pos=None):
+    if n_sources == 2:
+        return "2 speakers (stereo)"
+    if spk_pos is not None:
+        upper = [i for i, pos in enumerate(spk_pos) if pos[1] >= 0.0]
+        lower = [i for i, pos in enumerate(spk_pos) if pos[1] < 0.0]
+        if upper and lower:
+            return f"4 speakers (upper {upper}, lower {lower})"
+    return "4 speakers (2x2 arrays)"
+
+
+def format_channel_map(channel_map):
+    return ", ".join(f"spk{i}->{ch}" for i, ch in enumerate(channel_map))
+
+
+def parse_channel_map(channel_map_str):
+    if channel_map_str is None:
+        return None
+    parts = [int(x.strip()) for x in channel_map_str.split(",")]
+    if not parts:
+        raise ValueError("--channel-map must contain at least one channel.")
+    if any(ch < 1 for ch in parts):
+        raise ValueError("--channel-map channels must be 1-based positive integers.")
+    return parts
+
+
+def effective_channel_map(channel_map_arg, n_sources):
+    if channel_map_arg is None:
+        return list(range(1, n_sources + 1))
+    if len(channel_map_arg) == n_sources:
+        return list(channel_map_arg)
+    print(
+        f"Warning: channel map length {len(channel_map_arg)} != {n_sources} speakers; "
+        f"using 1..{n_sources}."
+    )
+    return list(range(1, n_sources + 1))
+
+
+def max_required_channels(channel_map_arg, filter_sets):
+    return max(
+        max(effective_channel_map(channel_map_arg, filter_set["n_sources"]))
+        for filter_set in filter_sets
+    )
+
+
 def load_filter_sets(output_dirs):
     filter_sets = []
     for output_dir in output_dirs:
         spk_filters = load_spk_filters(output_dir)
+        n_sources, n_taps = spk_filters.shape
+        validate_n_sources(n_sources)
+        spk_pos = load_spk_pos(output_dir, n_sources)
         try:
             label = str(output_dir.relative_to(ROOT))
         except ValueError:
             label = str(output_dir)
-        filter_sets.append((label, spk_filters))
-        n_sources, n_taps = spk_filters.shape
-        print(f"Loaded spk_filters from {output_dir} with shape ({n_sources}, {n_taps})")
+        filter_sets.append({
+            "label": label,
+            "spk_filters": spk_filters,
+            "spk_pos": spk_pos,
+            "n_sources": n_sources,
+        })
+        setup = setup_description(n_sources, spk_pos)
+        print(f"Loaded spk_filters from {output_dir}: {n_sources} speakers, {n_taps} taps ({setup})")
+        if spk_pos is not None:
+            for i, pos in enumerate(spk_pos):
+                print(f"  spk {i}: ({pos[0]:.3f}, {pos[1]:.3f})")
     return filter_sets
 
 
@@ -143,12 +218,26 @@ def apply_spk_filters(stimulus, spk_filters):
     return np.stack([ch[:min_len] for ch in channels], axis=1)
 
 
-def normalize_for_playback(audio, target_peak=0.9):
+def route_channels(audio, channel_map):
+    audio = np.asarray(audio, dtype=np.float64)
+    n_samples = audio.shape[0]
+    n_physical = max(channel_map)
+    routed = np.zeros((n_samples, n_physical), dtype=np.float64)
+    for source_idx, physical_ch in enumerate(channel_map):
+        routed[:, physical_ch - 1] = audio[:, source_idx]
+    return routed
+
+
+def normalize_for_playback(audio, target_peak=0.12):
     audio = np.asarray(audio, dtype=np.float64)
     peak = np.max(np.abs(audio))
     if peak > 0:
         audio = audio * (target_peak / peak)
     return audio.astype(np.float32)
+
+
+def prepare_playback_audio(logical_audio, channel_map):
+    return normalize_for_playback(route_channels(logical_audio, channel_map))
 
 
 def select_output_device(n_channels, device_index=None):
@@ -186,10 +275,11 @@ def save_wav(path, audio, fs):
 
 
 class LoopPlayer:
-    def __init__(self, audio, fs, device_index):
+    def __init__(self, audio, fs, device_index, channel_map):
         self.audio = audio
         self.fs = fs
         self.device_index = device_index
+        self.channel_map = list(channel_map)
         self.playing = False
         self.position = 0
         self.stream = None
@@ -237,51 +327,71 @@ class LoopPlayer:
         self.audio = audio
         self.position = 0
 
+    def restart(self, audio, channel_map):
+        new_map = list(channel_map)
+        layout_changed = (
+            tuple(new_map) != tuple(self.channel_map)
+            or audio.shape[1] != self.audio.shape[1]
+        )
+        was_playing = self.playing
+        self.audio = audio
+        self.channel_map = new_map
+        self.position = 0
+        if layout_changed and self.stream is not None:
+            self.stop()
+            self.start()
+            self.playing = was_playing
 
-def run_playback_loop(playlist, filter_sets, fs, device_index):
+
+def run_playback_loop(playlist, filter_sets, fs, device_index, channel_map_arg):
     devices = sd.query_devices()
     device_name = devices[device_index]["name"]
 
     pygame.init()
-    screen = pygame.display.set_mode((720, 360))
+    screen = pygame.display.set_mode((760, 420))
     pygame.display.set_caption("Filtered playback")
     font = pygame.font.SysFont(None, 28)
 
     folder_idx = 0
     source_idx = 0
+    channel_map = effective_channel_map(channel_map_arg, filter_sets[folder_idx]["n_sources"])
 
     def filtered_audio():
-        return apply_spk_filters(playlist[source_idx][1], filter_sets[folder_idx][1])
+        return apply_spk_filters(playlist[source_idx][1], filter_sets[folder_idx]["spk_filters"])
 
-    player = LoopPlayer(normalize_for_playback(filtered_audio()), fs, device_index)
+    player = LoopPlayer(prepare_playback_audio(filtered_audio(), channel_map), fs, device_index, channel_map)
     player.start()
-    n_channels = player.audio.shape[1]
 
     def select_source(new_idx):
         nonlocal source_idx
         source_idx = new_idx % len(playlist)
-        player.set_audio(normalize_for_playback(filtered_audio()))
+        player.set_audio(prepare_playback_audio(filtered_audio(), channel_map))
 
     def select_folder(new_idx):
-        nonlocal folder_idx
+        nonlocal folder_idx, channel_map
         folder_idx = new_idx % len(filter_sets)
-        player.set_audio(normalize_for_playback(filtered_audio()))
+        channel_map = effective_channel_map(channel_map_arg, filter_sets[folder_idx]["n_sources"])
+        player.restart(prepare_playback_audio(filtered_audio(), channel_map), channel_map)
 
     running = True
     clock = pygame.time.Clock()
     while running:
+        filter_set = filter_sets[folder_idx]
+        setup = setup_description(filter_set["n_sources"], filter_set["spk_pos"])
         screen.fill((25, 25, 25))
         status = "Playing — Space to pause" if player.playing else "Paused — Space to play"
         source_name = playlist[source_idx][0]
-        folder_name = filter_sets[folder_idx][0]
+        folder_name = filter_set["label"]
         for i, line in enumerate([
             status,
             f"Source: {source_name} ({source_idx + 1}/{len(playlist)})",
             "Up/Down to change source",
             f"Filters: {folder_name} ({folder_idx + 1}/{len(filter_sets)})",
             "Left/Right to change filters",
+            f"Setup: {setup}",
+            f"Channel map: {format_channel_map(channel_map)}",
             f"Device {device_index}: {device_name}",
-            f"{n_channels} channels   ESC to quit",
+            f"{max(channel_map)} physical channels ({len(channel_map)} speakers)   ESC to quit",
         ]):
             screen.blit(font.render(line, True, (220, 220, 220)), (20, 20 + 32 * i))
         pygame.display.flip()
@@ -321,10 +431,17 @@ def parse_args():
     )
     parser.add_argument("--output-dir", type=Path, default=None, help="Path to a single optimisation output run folder.")
     parser.add_argument("--fs", type=int, default=48000, help="Sample rate in Hz.")
-    parser.add_argument("--burst-s", type=float, default=0.5, help="Pink-noise burst duration in seconds.")
-    parser.add_argument("--silence-s", type=float, default=0.5, help="Silence before and after the burst in seconds.")
+    parser.add_argument("--burst-s", type=float, default=0.25, help="Pink-noise burst duration in seconds.")
+    parser.add_argument("--silence-s", type=float, default=0.25, help="Silence before and after the burst in seconds.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for pink-noise generation.")
     parser.add_argument("--device", type=int, default=None, help="Output device index for sounddevice.")
+    parser.add_argument(
+        "--channel-map",
+        default=None,
+        help="Comma-separated 1-based physical output channels per logical speaker "
+        "(e.g. 1,2 for stereo or 3,4,5,6 for a 4-speaker beamforming setup). "
+        "Defaults to 1..N.",
+    )
     parser.add_argument("--list-devices", action="store_true", help="List audio devices and exit.")
     parser.add_argument("--save-wav", type=Path, default=None, help="Optional path to save the filtered multi-channel WAV.")
     parser.add_argument("--no-play", action="store_true", help="Skip playback (use with --save-wav).")
@@ -349,8 +466,14 @@ def main():
     else:
         output_dirs = load_config_folders(args.config.resolve())
 
+    channel_map_arg = parse_channel_map(args.channel_map)
     filter_sets = load_filter_sets(output_dirs)
-    n_sources = max(spk_filters.shape[0] for _, spk_filters in filter_sets)
+    first_channel_map = effective_channel_map(channel_map_arg, filter_sets[0]["n_sources"])
+    if channel_map_arg is not None and len(channel_map_arg) != filter_sets[0]["n_sources"]:
+        print(
+            f"Note: --channel-map has {len(channel_map_arg)} entries for the first folder's "
+            f"{filter_sets[0]['n_sources']} speakers; per-folder maps may fall back to 1..N."
+        )
 
     playlist = build_stimulus_playlist(
         args.fs, args.burst_s, args.silence_s, args.seed, ROOT / "data" / "audio_tracks"
@@ -358,18 +481,23 @@ def main():
     n_tracks = len(playlist) - 1
     print(f"Loaded {len(playlist)} stimuli (pink noise + {n_tracks} tracks)")
 
-    filtered_audio = apply_spk_filters(playlist[0][1], filter_sets[0][1])
-    print(f"Filtered audio shape: {filtered_audio.shape} (samples, channels)")
+    filtered_audio = apply_spk_filters(playlist[0][1], filter_sets[0]["spk_filters"])
+    routed_audio = route_channels(filtered_audio, first_channel_map)
+    print(
+        f"Filtered audio shape: {filtered_audio.shape} (samples, logical channels); "
+        f"routed shape: {routed_audio.shape} (samples, physical channels)"
+    )
 
     if args.save_wav is not None:
-        save_wav(args.save_wav, filtered_audio, args.fs)
+        save_wav(args.save_wav, routed_audio, args.fs)
         print(f"Saved filtered burst to {args.save_wav}")
 
     if args.no_play:
         return
 
-    output_device = select_output_device(n_sources, args.device)
-    run_playback_loop(playlist, filter_sets, args.fs, output_device)
+    required_channels = max_required_channels(channel_map_arg, filter_sets)
+    output_device = select_output_device(required_channels, args.device)
+    run_playback_loop(playlist, filter_sets, args.fs, output_device, channel_map_arg)
 
 
 if __name__ == "__main__":
