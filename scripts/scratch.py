@@ -15,11 +15,14 @@ from utils.miscellaneous import (load_npy_to_torch,
                                 target_angle_for_listeners, 
                                 create_mtl_optimizer, 
                                 run_mtl_optimizer_step)
+from utils.dsp import magnitude_squared_coherence
 
 from filter_estimation.model import MultiSourceFIR
 from propagation.model import BinauralFreeFieldPropagation
 from models.listener_based.llado2025.model import llado2025_grad_surgery
 from models.listener_based.desena2020.model import desena2020
+from models.listener_based.cue_matching.model import CueMatchingModel
+from models.listener_based.cue_matching.helpers import get_target_cues
 from models.listener_based.LSD.model import LSD
 from models.loudspeaker_based.second_moment.model import SecondMoment
 from models.train import ModelTrainer
@@ -29,7 +32,7 @@ from logger.printing import print_loss_and_estimates
 
 with open('config/hyperpameters.json', 'r') as f:
     config = json.load(f)
-mtl_optimizer = config["training"]["mtl_optimizer"]
+mtl_optimizer = "cagrad" #config["training"]["mtl_optimizer"]
 skip_keys = config["saving"]["skip_keys"]
 use_tensorboard = config["saving"]["use_tensorboard"]
     
@@ -39,17 +42,19 @@ gtfb = load_npy_to_torch("data/banks/gtfb_48k.npy")
 lag_values = torch.arange(-0.001*48000, 0.001*48000 + 1, 1, dtype=torch.float32, device=hrirs.device) / 48000
 
 d = 2
-lstn_pos = torch.tensor([[0, 0], [0, 0.5], [0, -0.5]])
+lstn_pos = torch.tensor([[0,0],[0, 0.5], [0, -0.5]])
 spk_pos = torch.tensor([[d*torch.cos(torch.deg2rad(torch.tensor(30))), d*torch.sin(torch.deg2rad(torch.tensor(30)))], 
                         [d*torch.cos(torch.deg2rad(torch.tensor(30))), -d*torch.sin(torch.deg2rad(torch.tensor(30)))]])
 
 target_angle = 0.0
 target_position = torch.tensor([d * torch.cos(torch.deg2rad(torch.tensor(target_angle))), d * torch.sin(torch.deg2rad(torch.tensor(target_angle)))])
 target_angles = target_angle_for_listeners(lstn_pos, target_position)
+target_cues = get_target_cues(target_angles.unsqueeze(-1), sofaile, gtfb)
 
 llado_model = llado2025_grad_surgery(48000, hrirs, gtfb)
 desena_model = desena2020(48000, hrirs, gtfb)
 lsd_model = LSD(48000, sofaile, target_angles.unsqueeze(-1))
+cue_model = CueMatchingModel(48000, hrirs, gtfb)
 
 prop = BinauralFreeFieldPropagation(48000, lstn_pos, spk_pos, sofaile)
 
@@ -65,10 +70,10 @@ modelTrainer = ModelTrainer(
 )
 
 targets = {
-    "llado2025_grad_surgery": target_angles.unsqueeze(0),
+    "llado2025_grad_surgery": torch.ones(1, len(lstn_pos)),
     "desena2020": torch.zeros(1, len(lstn_pos)),
     "LSD": torch.zeros(1, len(lstn_pos)),
-    "SecondMoment": torch.zeros(1, n_sources),
+    "SecondMoment": torch.zeros(1, len(spk_pos)),
 }
 
 stim = torch.ones(1,1,1)
@@ -89,10 +94,11 @@ saving_manager.save("target_position", target_position)
 saving_manager.save("lstn_pos", lstn_pos)
 saving_manager.save("spk_pos", spk_pos)
 saving_manager.save("sofaile", sofaile)
+saving_manager.save("target_cues", target_cues)
 
 
 dummy_input = torch.ones(1,1)
-for i in range(1000):
+for i in range(1220):
 
     saving_manager.set_step(i)
     spk_filters = nn(dummy_input)
@@ -103,9 +109,15 @@ for i in range(1000):
     loss_dict = modelTrainer.compute_loss(targets)
     saving_manager.save("loss_dict", loss_dict)
     saving_manager.save("modelTrainer.estimates", modelTrainer.estimates)
-    if {"llado2025_grad_surgery", "desena2020", "llado2025"} & set(loss_dict):
-        cues = modelTrainer.kwargs_output["llado2025_grad_surgery"]["interauralcues"]
-        saving_manager.save("interaural_cues", {"itd": cues["itd"].detach(), "ild": cues["ild"].detach()})
+
+    binaural_flat = binaural_signals.view(-1, 2, binaural_signals.shape[-1])
+    _, mean_coherence = magnitude_squared_coherence(binaural_flat[..., 0, :], binaural_flat[..., 1, :])
+    saving_manager.save("ear_coherence", mean_coherence.detach())
+
+    for model_name, kwargs in modelTrainer.kwargs_output.items():
+        if "interauralcues" in kwargs:
+            cues = kwargs["interauralcues"]
+            saving_manager.save(f"{model_name}_cues", {"itd": cues["itd"].detach(), "ild": cues["ild"].detach()})
 
     optimizer.zero_grad()
     run_mtl_optimizer_step(mtl_optimizer, mtl, loss_dict, nn, optimizer, saving_manager, modelTrainer)
