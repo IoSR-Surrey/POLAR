@@ -56,21 +56,26 @@ def create_mtl_optimizer(model_trainer, mtl_optimizer, training_config=None):
         return None
     raise ValueError(f"Unsupported mtl_optimizer: {mtl_optimizer}")
 
-def run_mtl_optimizer_step(mtl_optimizer, mtl, loss_dict, filter_module, optimizer, saving_manager, model_trainer):
+def run_mtl_optimizer_step(mtl_optimizer, mtl, loss_dict, filter_module, optimizer, saving_manager, model_trainer, save=True):
     shared_params = list(filter_module.parameters())
+    saved = {}
 
     if mtl_optimizer == "gradnorm":
         gradnorm_info = mtl.step(loss_dict, shared_params, optimizer)
-        saving_manager.save("raw_grads", gradnorm_info["raw_grads"])
-        saving_manager.save("effective_grads", gradnorm_info["effective_grads"])
-        saving_manager.save("weighted_total", gradnorm_info["weighted_total"])
-        saving_manager.save("gradnorm_task_weights", gradnorm_info["task_weights"])
+        saved = {
+            "raw_grads": gradnorm_info["raw_grads"],
+            "effective_grads": gradnorm_info["effective_grads"],
+            "weighted_total": gradnorm_info["weighted_total"],
+            "gradnorm_task_weights": gradnorm_info["task_weights"],
+        }
     elif mtl_optimizer == "cagrad":
         cagrad_info = mtl.step(loss_dict, shared_params, optimizer)
-        saving_manager.save("raw_grads", cagrad_info["raw_grads"])
-        saving_manager.save("effective_grad", cagrad_info["effective_grad"])
-        saving_manager.save("cagrad_dual_weights", cagrad_info["task_weights"])
-        saving_manager.save("cagrad_task_coeffs", cagrad_info["task_coeffs"])
+        saved = {
+            "raw_grads": cagrad_info["raw_grads"],
+            "effective_grad": cagrad_info["effective_grad"],
+            "cagrad_dual_weights": cagrad_info["task_weights"],
+            "cagrad_task_coeffs": cagrad_info["task_coeffs"],
+        }
 
     elif mtl_optimizer == "gradnorm+cagrad":
         gradnorm, cagrad = mtl["gradnorm"], mtl["cagrad"]
@@ -80,17 +85,26 @@ def run_mtl_optimizer_step(mtl_optimizer, mtl, loss_dict, filter_module, optimiz
             loss_dict[name] = loss_dict[name] * task_weights[i]
 
         cagrad_info = cagrad.step(loss_dict, shared_params, optimizer)
-        saving_manager.save("raw_grads", cagrad_info["raw_grads"])
-        saving_manager.save("effective_grad", cagrad_info["effective_grad"])
-        saving_manager.save("cagrad_dual_weights", cagrad_info["task_weights"])
-        saving_manager.save("cagrad_task_coeffs", cagrad_info["task_coeffs"])
-        saving_manager.save("gradnorm_task_weights", gradnorm_info["task_weights"])
+        saved = {
+            "raw_grads": cagrad_info["raw_grads"],
+            "effective_grad": cagrad_info["effective_grad"],
+            "cagrad_dual_weights": cagrad_info["task_weights"],
+            "cagrad_task_coeffs": cagrad_info["task_coeffs"],
+            "gradnorm_task_weights": gradnorm_info["task_weights"],
+        }
     else:
         loss_grad_vectors, loss_grad_norms = extract_loss_grad_and_norms(loss_dict, filter_module)
         loss_dict['total'].backward()
         optimizer.step()
-        saving_manager.save("raw_grads", loss_grad_vectors)
-        saving_manager.save("raw_grad_norms", loss_grad_norms)
+        saved = {
+            "raw_grads": loss_grad_vectors,
+            "raw_grad_norms": loss_grad_norms,
+        }
+
+    if save:
+        for key, value in saved.items():
+            saving_manager.save(key, value)
+    return saved
 
     
 def _flatten_tap_grads(grad_on_taps):

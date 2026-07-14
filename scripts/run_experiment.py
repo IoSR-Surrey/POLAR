@@ -21,7 +21,9 @@ from models.loudspeaker_based.second_moment.model import SecondMoment
 from models.train import ModelTrainer
 from logger.saving import SavingManager
 from plotting.miscellaneous import ALL_PLOTTING_FUNCTIONS
+from plotting.evaluation import compute_white_noise_plot_outputs
 from logger.printing import print_loss_and_estimates
+from datasets.stimulus_dataset import get_stim_loader
 
 LOSS_SETS = {
     "llado_only": ["llado2025_grad_surgery"],
@@ -124,6 +126,7 @@ def run_experiment(
 
     geometry_config = config["geometry"]
     filter_config = config["filter_estimator"]
+    stimulus_config = config["stimulus_dataset"]
     skip_keys = config["saving"]["skip_keys"]
 
     set_seed(env_config["seed"])
@@ -201,11 +204,32 @@ def run_experiment(
     saving_manager.save("spk_pos", spk_pos)
     saving_manager.save("sofaile", sofaile)
 
-    stim = torch.ones(1, 1, 1, dtype=dtype, device=device)
+    stim_loader, _ = get_stim_loader(
+        fs=fs,
+        n_bands=stimulus_config["n_bands"],
+        n_samples_per_band=stimulus_config["n_samples_per_band"],
+        batch_size=training_config["batch_size"],
+        stimulus_length_ms=stimulus_config["stimulus_length_ms"],
+        ramp_time_ms=stimulus_config["ramp_time_ms"],
+        f_min=stimulus_config["f_min"],
+        f_max=stimulus_config["f_max"],
+        shuffle=training_config["shuffle"],
+        num_workers=training_config["num_workers"],
+        pin_memory=training_config["pin_memory"],
+        drop_last=training_config["drop_last"],
+    )
+    stim_iter = iter(stim_loader)
     dummy_input = torch.ones(1, 1, dtype=dtype, device=device)
     epoch_metrics = []
 
     for epoch in range(num_epochs):
+        try:
+            stim = next(stim_iter)
+        except StopIteration:
+            stim_iter = iter(stim_loader)
+            stim = next(stim_iter)
+        stim = stim.to(device=device, dtype=dtype)
+
         saving_manager.set_step(epoch)
         spk_filters = filter_estimator(dummy_input)
         binaural_signals = prop(stim, spk_filters)
@@ -217,7 +241,7 @@ def run_experiment(
 
         if "llado2025_grad_surgery" in model_trainer.model_dict:
             cues = model_trainer.kwargs_output["llado2025_grad_surgery"]["interauralcues"]
-            saving_manager.save("interaural_cues", {"itd": cues["itd"].detach(), "ild": cues["ild"].detach()})
+            saving_manager.save("llado2025_grad_surgery_cues", {"itd": cues["itd"].detach(), "ild": cues["ild"].detach()})
 
         optimizer.zero_grad()
         run_mtl_optimizer_step(
@@ -242,25 +266,35 @@ def run_experiment(
 
     with torch.no_grad():
         spk_filters = filter_estimator(dummy_input)
-        binaural_signals = prop(stim, spk_filters)
-        binaural_signals_flat = binaural_signals.view(binaural_signals.shape[0] * binaural_signals.shape[1], 2, -1)
-        localisation_angles = llado_model(binaural_signals_flat, stim)["output"]
-        if desena_model is not None:
-            localisation_uncertainty = desena_model(binaural_signals_flat, stim)["output"]
+        saving_manager.save("spk_filters", spk_filters)
+        plot_outputs = compute_white_noise_plot_outputs(saving_manager, config_path=config_path)
+        if plot_outputs is not None:
+            saving_manager.save("binaural_signals", plot_outputs["binaural_signals"])
+            saving_manager.save("localisation_angles", plot_outputs["localisation_angles"])
+            if "localisation_uncertainty" in plot_outputs:
+                saving_manager.save("localisation_uncertainty", plot_outputs["localisation_uncertainty"])
+            if "lsd" in plot_outputs:
+                saving_manager.save("lsd", plot_outputs["lsd"])
+            if "llado2025_grad_surgery_cues" in plot_outputs:
+                saving_manager.save("llado2025_grad_surgery_cues", plot_outputs["llado2025_grad_surgery_cues"])
+            stim = plot_outputs["stim"]
+            binaural_signals = plot_outputs["binaural_signals"].unsqueeze(0)
         else:
-            localisation_uncertainty = torch.zeros_like(localisation_angles)
-        if lsd_model is not None:
-            lsd = lsd_model(binaural_signals_flat, stim)["output"]
-        else:
-            lsd = torch.full_like(localisation_angles, float("inf"))
+            stim = next(iter(get_stim_loader(
+                fs=fs,
+                n_bands=stimulus_config["n_bands"],
+                n_samples_per_band=stimulus_config["n_samples_per_band"],
+                batch_size=training_config["batch_size"],
+                stimulus_length_ms=stimulus_config["stimulus_length_ms"],
+                ramp_time_ms=stimulus_config["ramp_time_ms"],
+                f_min=stimulus_config["f_min"],
+                f_max=stimulus_config["f_max"],
+                shuffle=False,
+                drop_last=training_config["drop_last"],
+            )[0])).to(device=device, dtype=dtype)
+            binaural_signals = prop(stim, spk_filters)
 
-    saving_manager.save("binaural_signals", binaural_signals_flat)
-    saving_manager.save("localisation_angles", localisation_angles)
-    saving_manager.save("localisation_uncertainty", localisation_uncertainty)
-    saving_manager.save("lsd", lsd)
-    saving_manager.save("spk_filters", spk_filters)
-
-    model_trainer.compute_estimates(binaural_signals, spk_filters, stim)
+        model_trainer.compute_estimates(binaural_signals, spk_filters, stim)
     final_loss_dict = model_trainer.compute_loss(targets)
     summary = _compute_summary_metrics(model_trainer, targets, final_loss_dict, llado_model, desena_model)
     summary.update({

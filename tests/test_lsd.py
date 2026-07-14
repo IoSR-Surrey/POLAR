@@ -55,8 +55,8 @@ def _mono_reference(batch: int, signal_len: int = SIGNAL_LEN) -> torch.Tensor:
     return torch.randn(batch, 1, signal_len)
 
 
-def _reference_for_model(model: LSD, signal_len: int = SIGNAL_LEN) -> torch.Tensor:
-    return _mono_reference(len(model.target_angles), signal_len)
+def _reference_for_model(model: LSD, batch: int = 1, signal_len: int = SIGNAL_LEN) -> torch.Tensor:
+    return _mono_reference(batch, signal_len)
 
 
 def _binaural_from_reference(model: LSD, reference_signals: torch.Tensor) -> torch.Tensor:
@@ -89,23 +89,26 @@ def test_freq_bin_mask_respects_band_limits(model: LSD) -> None:
 
 
 def test_compute_binaural_reference_signals_shape(model: LSD) -> None:
-    reference_signals = _mono_reference(len(model.target_angles))
+    n_stim = 2
+    n_listeners = len(model.target_angles)
+    reference_signals = _mono_reference(n_stim)
     binaural_reference = model.compute_binaural_reference_signals(reference_signals)
 
     assert binaural_reference.shape == (
-        len(model.target_angles),
+        n_stim * n_listeners,
         2,
         SIGNAL_LEN + IR_LEN - 1,
     )
 
 
 def test_forward_output_shape(model: LSD) -> None:
+    n_stim = 2
     n_listeners = len(model.target_angles)
-    reference_signals = _mono_reference(n_listeners)
+    reference_signals = _mono_reference(n_stim)
     binaural_signals = _binaural_from_reference(model, reference_signals)
     result = model(binaural_signals, reference_signals)
 
-    assert result["output"].shape == (n_listeners,)
+    assert result["output"].shape == (n_stim * n_listeners,)
 
 
 def test_forward_returns_expected_keys(single_listener_model: LSD) -> None:
@@ -135,7 +138,7 @@ def test_mismatched_binaural_signals_have_positive_lsd(single_listener_model: LS
 
 
 def test_lsd_is_non_negative(model: LSD) -> None:
-    reference_signals = _mono_reference(len(model.target_angles))
+    reference_signals = _mono_reference(1)
     binaural_signals = _binaural_from_reference(model, reference_signals)
     result = model(binaural_signals, reference_signals)
 
@@ -173,7 +176,7 @@ def test_reference_rendered_through_target_hrirs_matches_propagation(sofaile, ls
     prop = SingleSourceBinauralFreeFieldPropagation(lstn_pos, target_pos, sofaile, fs=FS)
     propagated = prop(stim, torch.ones(1, 1, 1)).squeeze(0)
 
-    reference_signals = stim.expand(len(lstn_pos), -1, -1)
+    reference_signals = stim
     rendered = model.compute_binaural_reference_signals(reference_signals)
 
     min_len = min(propagated.shape[-1], rendered.shape[-1])

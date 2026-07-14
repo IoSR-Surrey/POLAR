@@ -26,7 +26,10 @@ def split_interaural_cues_by_listener(itd, ild, n_listeners):
 
     itd = itd.reshape(n_flat // n_listeners, n_listeners, -1)
     ild = ild.reshape(n_flat // n_listeners, n_listeners, -1)
-    return [(itd[0, listener_idx], ild[0, listener_idx]) for listener_idx in range(n_listeners)]
+    return [
+        (itd[:, listener_idx].mean(axis=0), ild[:, listener_idx].mean(axis=0))
+        for listener_idx in range(n_listeners)
+    ]
 
 
 def _compute_target_itd_ild(sofaile, target_angle, gtfb, lag_values, tau_iacc):

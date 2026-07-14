@@ -20,6 +20,7 @@ from plotting.XY_plots import (time_domain_filters_plot,
                      iacc_over_epochs_plot)
 from plotting.scatter_plots import itd_ild_scatter_plot, itd_ild_scatter_evolution_gif, cue_matching_itd_ild_scatter_plot
 from plotting.spatial_plots import localisation_arrows_plot
+from plotting.evaluation import compute_white_noise_plot_outputs
 
 
 def ALL_PLOTTING_FUNCTIONS(saving_manager, show_plots=False):
@@ -29,6 +30,19 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager, show_plots=False):
         fs = config["env"]["fs"]
 
     n_listeners, listener_labels = get_listener_plot_info(saving_manager)
+
+    white_noise_plot_outputs = compute_white_noise_plot_outputs(saving_manager)
+    if white_noise_plot_outputs is not None:
+        if "binaural_signals" in white_noise_plot_outputs:
+            saving_manager.saved_data["binaural_signals"] = [white_noise_plot_outputs["binaural_signals"]]
+        if "localisation_angles" in white_noise_plot_outputs:
+            saving_manager.saved_data["localisation_angles"] = [white_noise_plot_outputs["localisation_angles"]]
+        if "localisation_uncertainty" in white_noise_plot_outputs:
+            saving_manager.saved_data["localisation_uncertainty"] = [white_noise_plot_outputs["localisation_uncertainty"]]
+        if "lsd" in white_noise_plot_outputs:
+            saving_manager.saved_data["lsd"] = [white_noise_plot_outputs["lsd"]]
+        if "llado2025_grad_surgery_cues" in white_noise_plot_outputs:
+            saving_manager.saved_data["llado2025_grad_surgery_cues"][-1] = white_noise_plot_outputs["llado2025_grad_surgery_cues"]
 
     if "spk_filters" in saving_manager.saved_data:
         spk_filters = saving_manager.saved_data["spk_filters"][0]
@@ -199,6 +213,7 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager, show_plots=False):
             saving_manager.saved_data["binaural_signals"][0],
             fs=fs,
             listener_labels=listener_labels,
+            n_listeners=n_listeners,
         )
         saving_manager.save_new_plots("ear_signals_magnitude_phase")
 
@@ -206,6 +221,7 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager, show_plots=False):
         iacc_over_epochs_plot(
             saving_manager.saved_data["iacc"],
             listener_labels=listener_labels,
+            n_listeners=n_listeners,
         )
         saving_manager.save_new_plots("iacc_over_epochs")
 

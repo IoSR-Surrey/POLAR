@@ -29,9 +29,9 @@ class LSD(nn.Module):
         self.freq_bin_mask = (self.fft_frequencies >= self.f_min) & (self.fft_frequencies <= self.f_max)
 
 
-    def forward(self, binaural_signals, reference_signals):
+    def forward(self, binaural_signals, reference_signals, listener_indices = None):
 
-        binaural_reference_signals = self.compute_binaural_reference_signals(reference_signals)
+        binaural_reference_signals = self.compute_binaural_reference_signals(reference_signals, listener_indices)
         lsd = self.log_spectral_distortion(binaural_signals, binaural_reference_signals)
 
         return {"output": lsd, "kwargs": {"binaural_reference_signals": binaural_reference_signals}}
@@ -63,11 +63,18 @@ class LSD(nn.Module):
         return lsd
 
 
-    def compute_binaural_reference_signals(self, reference_signals):
+    def compute_binaural_reference_signals(self, reference_signals, listener_indices = None):
 
-        binaural_reference_signals = TF.fftconvolve(reference_signals, self.target_hrirs, mode='full')
+        if listener_indices is None:
+            listener_indices = torch.arange(len(self.target_hrirs), device=self.device)
+        
+        n_stim = len(reference_signals)
+        n_lstn = len(listener_indices)
+        hrirs = self.target_hrirs[listener_indices].reshape(1, 2*n_lstn, -1)
 
-        return binaural_reference_signals
+        ear_signals = TF.convolve(reference_signals, hrirs, mode='full').view(n_stim, n_lstn, 2, -1)
+
+        return ear_signals.view(n_stim*n_lstn, 2, -1)
 
     
     def _erb_frequency_bin_weights(self, eps=1e-12):

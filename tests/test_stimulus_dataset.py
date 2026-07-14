@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import torch
 
-from datasets.stimulus_dataset.dataset import BandpassWhiteNoiseDataset, _erb_bandwidth
+from datasets.stimulus_dataset.dataset import BandpassWhiteNoiseDataset, get_stim_loader, _erb_bandwidth
 
 FS = 48000
 N_BANDS = 8
@@ -176,3 +176,22 @@ def test_adjacent_bands_have_low_spectral_crosstalk(dataset) -> None:
             other_power = _mean_power_in_range(freqs, power, other_low, other_high)
 
             assert own_power > 10.0 * other_power
+
+
+def test_get_stim_loader_batches_stimuli() -> None:
+    batch_size = 4
+    loader, dataset = get_stim_loader(
+        fs=FS,
+        n_bands=N_BANDS,
+        n_samples_per_band=SAMPLES_PER_BAND,
+        batch_size=batch_size,
+        stimulus_length_ms=STIMULUS_LENGTH_MS,
+        ramp_time_ms=RAMP_TIME_MS,
+        shuffle=False,
+        drop_last=True,
+    )
+
+    stim_batch = next(iter(loader))
+    assert stim_batch.shape == (batch_size, 1, dataset.n_samples)
+    assert stim_batch.dtype == torch.float32
+    assert len(loader) == len(dataset) // batch_size

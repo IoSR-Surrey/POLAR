@@ -28,7 +28,16 @@ from models.loudspeaker_based.second_moment.model import SecondMoment
 from models.train import ModelTrainer
 from logger.saving import SavingManager
 from plotting.miscellaneous import ALL_PLOTTING_FUNCTIONS
+from plotting.evaluation import compute_white_noise_plot_outputs
+from plotting.batch_utils import (
+    average_coherence_values,
+    average_estimates_dicts,
+    average_interaural_cues_dicts,
+    average_loss_dicts,
+    average_mtl_saved_values,
+)
 from logger.printing import print_loss_and_estimates
+from datasets.stimulus_dataset import get_stim_loader
 
 with open('config/hyperpameters.json', 'r') as f:
     config = json.load(f)
@@ -65,18 +74,28 @@ nn = MultiSourceFIR(n_taps, n_sources)
 second_moment = SecondMoment(n_taps, n_sources)
 
 modelTrainer = ModelTrainer(
-    [llado_model, desena_model, lsd_model, second_moment],
-    weights=[1.0, 1.0, 1.0, 1.0],
+    [llado_model],
+    weights=[1.0],
 )
 
 targets = {
-    "llado2025_grad_surgery": torch.ones(1, len(lstn_pos)),
-    "desena2020": torch.zeros(1, len(lstn_pos)),
-    "LSD": torch.zeros(1, len(lstn_pos)),
-    "SecondMoment": torch.zeros(1, len(spk_pos)),
+    "llado2025_grad_surgery": target_angles.unsqueeze(0),
 }
 
-stim = torch.ones(1,1,1)
+stim_loader, stim_dataset = get_stim_loader(
+    fs=config["env"]["fs"],
+    n_bands=config["stimulus_dataset"]["n_bands"],
+    n_samples_per_band=config["stimulus_dataset"]["n_samples_per_band"],
+    batch_size=config["training"]["batch_size"],
+    stimulus_length_ms=config["stimulus_dataset"]["stimulus_length_ms"],
+    ramp_time_ms=config["stimulus_dataset"]["ramp_time_ms"],
+    f_min=config["stimulus_dataset"]["f_min"],
+    f_max=config["stimulus_dataset"]["f_max"],
+    shuffle=config["training"]["shuffle"],
+    num_workers=config["training"]["num_workers"],
+    pin_memory=config["training"]["pin_memory"],
+    drop_last=config["training"]["drop_last"],
+)
 
 optimizer = torch.optim.Adam(nn.parameters(), lr=0.01)
 mtl = create_mtl_optimizer(modelTrainer, mtl_optimizer)
@@ -98,48 +117,68 @@ saving_manager.save("target_cues", target_cues)
 
 
 dummy_input = torch.ones(1,1)
-for i in range(1220):
+n_listeners = len(lstn_pos)
+for epoch in range(config["training"]["num_epochs"]):
+    batch_loss_dicts = []
+    batch_estimates = []
+    batch_coherences = []
+    batch_cues = {}
+    batch_mtl_saved = []
 
-    saving_manager.set_step(i)
-    spk_filters = nn(dummy_input)
+    for stim in stim_loader:
+        spk_filters = nn(dummy_input)
+        binaural_signals = prop(stim, spk_filters)
 
-    binaural_signals = prop(stim, spk_filters)
+        modelTrainer.compute_estimates(binaural_signals, spk_filters, stim)
+        loss_dict = modelTrainer.compute_loss(targets)
+        batch_loss_dicts.append(loss_dict)
+        batch_estimates.append(modelTrainer.estimates)
 
-    modelTrainer.compute_estimates(binaural_signals, spk_filters, stim)
-    loss_dict = modelTrainer.compute_loss(targets)
-    saving_manager.save("loss_dict", loss_dict)
-    saving_manager.save("modelTrainer.estimates", modelTrainer.estimates)
+        binaural_flat = binaural_signals.view(-1, 2, binaural_signals.shape[-1])
+        # _, mean_coherence = magnitude_squared_coherence(binaural_flat[..., 0, :], binaural_flat[..., 1, :])
+        # batch_coherences.append(mean_coherence)
 
-    binaural_flat = binaural_signals.view(-1, 2, binaural_signals.shape[-1])
-    _, mean_coherence = magnitude_squared_coherence(binaural_flat[..., 0, :], binaural_flat[..., 1, :])
-    saving_manager.save("ear_coherence", mean_coherence.detach())
+        for model_name, kwargs in modelTrainer.kwargs_output.items():
+            if "interauralcues" in kwargs:
+                cues = kwargs["interauralcues"]
+                batch_cues.setdefault(model_name, []).append(
+                    {"itd": cues["itd"].detach(), "ild": cues["ild"].detach()}
+                )
 
-    for model_name, kwargs in modelTrainer.kwargs_output.items():
-        if "interauralcues" in kwargs:
-            cues = kwargs["interauralcues"]
-            saving_manager.save(f"{model_name}_cues", {"itd": cues["itd"].detach(), "ild": cues["ild"].detach()})
+        optimizer.zero_grad()
+        batch_mtl_saved.append(
+            run_mtl_optimizer_step(
+                mtl_optimizer, mtl, loss_dict, nn, optimizer, saving_manager, modelTrainer, save=False
+            )
+        )
 
-    optimizer.zero_grad()
-    run_mtl_optimizer_step(mtl_optimizer, mtl, loss_dict, nn, optimizer, saving_manager, modelTrainer)
+    saving_manager.set_step(epoch)
+    epoch_loss_dict = average_loss_dicts(batch_loss_dicts)
+    epoch_estimates = average_estimates_dicts(batch_estimates)
+    saving_manager.save("loss_dict", epoch_loss_dict)
+    saving_manager.save("modelTrainer.estimates", epoch_estimates)
+    # saving_manager.save("ear_coherence", average_coherence_values(batch_coherences, n_listeners))
+    for model_name, cues_dicts in batch_cues.items():
+        saving_manager.save(
+            f"{model_name}_cues", average_interaural_cues_dicts(cues_dicts, n_listeners)
+        )
+    for key, value in average_mtl_saved_values(batch_mtl_saved).items():
+        saving_manager.save(key, value)
 
     saving_manager.flush_tensorboard()
-    print_loss_and_estimates(loss_dict, modelTrainer.estimates, i)
+    print_loss_and_estimates(epoch_loss_dict, epoch_estimates, epoch)
 
 with torch.no_grad():
     spk_filters = nn(dummy_input)
-    binaural_signals = prop(stim, spk_filters)
-    binaural_signals = binaural_signals.view(
-        binaural_signals.shape[0] * binaural_signals.shape[1], 2, -1
-    )
-    localisation_angles = llado_model(binaural_signals, stim)["output"]
-    localisation_uncertainty = desena_model(binaural_signals, stim)["output"]
-    lsd = lsd_model(binaural_signals, stim)["output"]
-
-saving_manager.save("binaural_signals", binaural_signals)
-saving_manager.save("localisation_angles", localisation_angles)
-saving_manager.save("localisation_uncertainty", localisation_uncertainty)
-saving_manager.save("lsd", lsd)
-saving_manager.save("spk_filters", spk_filters)
+    saving_manager.save("spk_filters", spk_filters)
+    plot_outputs = compute_white_noise_plot_outputs(saving_manager)
+    if plot_outputs is not None:
+        saving_manager.save("binaural_signals", plot_outputs["binaural_signals"])
+        saving_manager.save("localisation_angles", plot_outputs["localisation_angles"])
+        saving_manager.save("localisation_uncertainty", plot_outputs["localisation_uncertainty"])
+        saving_manager.save("lsd", plot_outputs["lsd"])
+        if "llado2025_grad_surgery_cues" in plot_outputs:
+            saving_manager.save("llado2025_grad_surgery_cues", plot_outputs["llado2025_grad_surgery_cues"])
 
 saving_manager.export_to_disk()
 print(f"Saved outputs to {saving_manager.output_dir}")

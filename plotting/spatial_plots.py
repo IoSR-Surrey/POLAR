@@ -3,6 +3,7 @@ from matplotlib import cm, colors
 import numpy as np
 
 from utils.miscellaneous import ready_for_plotting
+from plotting.batch_utils import mean_over_stimulus_batch
 
 
 def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty, lsd, target_angle=None, listener_labels=None, max_arrow_length=1.2, lsd_vmax=None):
@@ -14,9 +15,14 @@ def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty
 
     fig, ax = plt.subplots()
 
+    n_listeners = lstn_pos.shape[0]
+    if localisation_angles.size != n_listeners:
+        localisation_angles = mean_over_stimulus_batch(localisation_angles, n_listeners)
+    if uncertainty.size != n_listeners:
+        uncertainty = mean_over_stimulus_batch(uncertainty, n_listeners)
+
     localisation_angles = np.atleast_1d(localisation_angles)
     uncertainty = np.atleast_1d(uncertainty)
-    n_listeners = lstn_pos.shape[0]
 
     ax.scatter(spk_pos[:, 0], spk_pos[:, 1], c='black', marker='x', label='Speaker', zorder=3)
     ax.scatter(lstn_pos[:, 0], lstn_pos[:, 1], c='blue', marker='o', label='Listener', zorder=3)
@@ -26,6 +32,8 @@ def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty
     arrow_width = 2
 
     lsd = np.squeeze(ready_for_plotting(lsd))
+    if lsd.size != n_listeners:
+        lsd = mean_over_stimulus_batch(lsd, n_listeners)
     lsd = np.atleast_1d(lsd)
     has_lsd = not np.all(np.isinf(lsd))
 

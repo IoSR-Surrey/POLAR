@@ -3,6 +3,7 @@ import numpy as np
 
 from utils.miscellaneous import ready_for_plotting
 from utils.dsp import cosine_similarity
+from plotting.batch_utils import mean_over_stimulus_batch, reduce_batch_dimension
 
 def time_domain_filters_plot(filters, fs=48000):
 
@@ -46,19 +47,24 @@ def frequency_domain_filters_plot(filters, fs=48000, nfft = 2048):
     n_samples = filters.shape[1]
     
     filters = np.fft.rfft(filters, axis=1, n=nfft)
-    filters = 20*np.log10(np.abs(filters) + 1e-10)
+    filters_db = 20*np.log10(np.abs(filters) + 1e-10)
     frequency_axis = np.fft.rfftfreq(nfft, 1/fs)
+    
+    vmin = np.min(filters_db)
+    vmax = np.max(filters_db)
 
     grid_size = int(np.ceil(np.sqrt(n_filters)))
     fig, ax = plt.subplots(grid_size, grid_size, figsize=(10, 10), squeeze=False)
     ax = ax.ravel()
 
     for i in range(n_filters):
-        ax[i].semilogx(frequency_axis, filters[i, :])
+        ax[i].semilogx(frequency_axis, filters_db[i, :])
         ax[i].set_title(f"Filter {i+1}")
         ax[i].set_xlabel("Frequency (Hz)")
         ax[i].set_ylabel("Magnitude (dB)")
         ax[i].grid(True)
+        ax[i].set_ylim(vmin, vmax)
+   
 
     # Hide any unused subplots
     for j in range(n_filters, grid_size * grid_size):
@@ -93,6 +99,9 @@ def plot_loss_and_estimates(loss_dict, estimates, title, n_listeners=None, liste
     for key in keys:
         losses = np.squeeze(ready_for_plotting([loss_dict[epoch][key] for epoch in range(n_epochs)]))
         model_estimates = np.asarray(ready_for_plotting([estimates[epoch][key] for epoch in range(n_epochs)]))
+
+        if n_listeners is not None:
+            model_estimates = reduce_batch_dimension(model_estimates, n_listeners)
 
         # Squeeze out singleton dimensions before checking shape
         model_estimates = np.squeeze(model_estimates)
@@ -283,9 +292,12 @@ def gradnorm_task_weights_over_epochs_plot(gradnorm_task_weights, task_names, ti
     plt.tight_layout()
 
 
-def iacc_over_epochs_plot(iacc, listener_labels=None):
+def iacc_over_epochs_plot(iacc, listener_labels=None, n_listeners=None):
     """Plot Interaural Cross-Correlation Coefficient (IACC) over epochs."""
     iacc = np.asarray(ready_for_plotting(iacc))
+
+    if n_listeners is not None:
+        iacc = reduce_batch_dimension(iacc, n_listeners)
 
     # Shape: (n_epochs, n_listeners) or (n_epochs,) if single listener
     if iacc.ndim == 1:
@@ -307,13 +319,15 @@ def iacc_over_epochs_plot(iacc, listener_labels=None):
     plt.tight_layout()
 
 
-def ear_signals_magnitude_phase_plot(binaural_signals, fs=48000, nfft=2048, listener_labels=None):
+def ear_signals_magnitude_phase_plot(binaural_signals, fs=48000, nfft=2048, listener_labels=None, n_listeners=None):
     """Plot magnitude and phase of the ear signals for each virtual listener."""
     binaural_signals = ready_for_plotting(binaural_signals)
 
     # Expected shape: (n_listeners, 2, signal_length) where 2 = [left, right]
     if binaural_signals.ndim == 2:
         binaural_signals = binaural_signals[np.newaxis, ...]
+    if n_listeners is not None and binaural_signals.shape[0] != n_listeners:
+        binaural_signals = mean_over_stimulus_batch(binaural_signals, n_listeners)
     n_listeners = binaural_signals.shape[0]
 
     if listener_labels is None:

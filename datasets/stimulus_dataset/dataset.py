@@ -1,6 +1,7 @@
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 import numpy as np
+import sys
 from scipy import signal
 
 
@@ -85,3 +86,41 @@ class BandpassWhiteNoiseDataset(Dataset):
                 )
 
         return torch.from_numpy(stimuli)
+
+
+def get_stim_loader(
+    fs,
+    n_bands,
+    n_samples_per_band,
+    batch_size,
+    stimulus_length_ms=5,
+    ramp_time_ms=1,
+    f_min=20.0,
+    f_max=20000.0,
+    shuffle=True,
+    num_workers=0,
+    pin_memory=False,
+    drop_last=False,
+):
+    # Pre-generated stimuli are indexed in the main process; workers add no benefit on Windows.
+    if sys.platform == "win32" and num_workers > 0:
+        num_workers = 0
+
+    dataset = BandpassWhiteNoiseDataset(
+        fs=fs,
+        n_bands=n_bands,
+        n_samples_per_band=n_samples_per_band,
+        stimulus_length_ms=stimulus_length_ms,
+        ramp_time_ms=ramp_time_ms,
+        f_min=f_min,
+        f_max=f_max,
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=drop_last,
+    )
+    return loader, dataset
