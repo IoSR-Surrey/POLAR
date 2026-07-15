@@ -5,6 +5,8 @@ import numpy as np
 from utils.miscellaneous import ready_for_plotting
 from plotting.batch_utils import mean_over_stimulus_batch
 
+LSD_LOWPASS_REFERENCE_DB = 14.31
+
 
 def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty, lsd, target_angle=None, listener_labels=None, max_arrow_length=1.2, lsd_vmax=None):
 
@@ -38,7 +40,8 @@ def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty
     has_lsd = not np.all(np.isinf(lsd))
 
     if has_lsd:
-        lsd_norm = colors.Normalize(vmin=0.0, vmax=float(lsd_vmax if lsd_vmax is not None else max(lsd.max(), 1e-3)))
+        lsd_vmax = float(lsd_vmax if lsd_vmax is not None else max(LSD_LOWPASS_REFERENCE_DB, lsd.max(), 1e-3))
+        lsd_norm = colors.Normalize(vmin=0.0, vmax=lsd_vmax)
         lsd_cmap = colors.LinearSegmentedColormap.from_list(
             "green_red", [(0, 1, 0), (0.8, 0.4, 0), (0.8, 0, 0)]
         )
@@ -96,5 +99,11 @@ def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty
     ax.grid(True, zorder=0)
     ax.legend()
     if has_lsd:
-        fig.colorbar(lsd_sm, ax=ax, label='LSD')
+        cbar = fig.colorbar(lsd_sm, ax=ax, label='LSD [dB]')
+        if LSD_LOWPASS_REFERENCE_DB <= lsd_vmax:
+            cbar.ax.axhline(LSD_LOWPASS_REFERENCE_DB, color='black', linewidth=0.8, linestyle='--')
+            cbar.ax.text(
+                1.15, LSD_LOWPASS_REFERENCE_DB, f'{LSD_LOWPASS_REFERENCE_DB:g} (7 kHz LP ref)',
+                va='center', ha='left', fontsize=8, transform=cbar.ax.get_yaxis_transform(), clip_on=False,
+            )
     fig.tight_layout()
