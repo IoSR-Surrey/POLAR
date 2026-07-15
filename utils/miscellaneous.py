@@ -6,6 +6,8 @@ from models.gradnorm import GradNorm
 
 from logger.saving import extract_loss_grad_and_norms
 
+from scipy.signal import firwin, lfilter
+
 def load_npy_to_torch(npy_file, device='cpu', dtype=torch.float32):
     return torch.from_numpy(np.load(npy_file)).to(device=device, dtype=dtype)
 
@@ -114,3 +116,9 @@ def _flatten_tap_grads(grad_on_taps):
     if not grads:
         return None
     return torch.cat([g.flatten() for g in grads])
+
+def generate_low_pass_stimulus(cutoff_hz=1000, fs=48000, length=512, device='cpu', dtype=torch.float32):
+    fir_coeff = firwin(numtaps=101, cutoff=cutoff_hz, fs=fs)
+    noise = np.random.randn(length)
+    lowpass_signal = lfilter(fir_coeff, 1.0, noise)
+    return torch.from_numpy(lowpass_signal).to(device=device, dtype=dtype).unsqueeze(0).unsqueeze(0)

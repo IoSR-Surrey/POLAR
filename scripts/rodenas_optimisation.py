@@ -19,7 +19,8 @@ from utils.sofa_functions import load_sofa, get_template_for_llado2025_desena_20
 from utils.miscellaneous import (load_npy_to_torch,
                                 target_angle_for_listeners,
                                 create_mtl_optimizer,
-                                run_mtl_optimizer_step)
+                                run_mtl_optimizer_step,
+                                generate_low_pass_stimulus)
 from filter_estimation.model import MultiSourceFIR
 from propagation.model import BinauralFreeFieldPropagation
 from models.listener_based.llado2025.model import llado2025_grad_surgery
@@ -677,7 +678,7 @@ lag_values = torch.arange(-0.001*48000, 0.001*48000 + 1, 1, dtype=torch.float32,
 
 speakers_per_array = 2
 speaker_distance = 2.5
-speaker_spacing_m = 0.244
+speaker_spacing_m = 0.17
 relative_offsets = (np.arange(speakers_per_array, dtype=float) - (speakers_per_array - 1) / 2.0) * speaker_spacing_m
 upper_centre = np.array([speaker_distance * np.cos(np.deg2rad(30.0)), speaker_distance * np.sin(np.deg2rad(30.0))])
 lower_centre = np.array([speaker_distance * np.cos(np.deg2rad(-30.0)), speaker_distance * np.sin(np.deg2rad(-30.0))])
@@ -713,20 +714,29 @@ for local_idx in range(speakers_per_array):
 second_moment = SecondMoment(n_taps, n_sources)
 
 modelTrainer = ModelTrainer(
-    [llado_model],
+    [
+        llado_model,
+        lsd_model
+    ],
     criterions=[
         make_listener_weighted_loss(listener_weights, 'cpu', torch.float32, pointwise="squared"),
+        make_listener_weighted_loss(listener_weights, 'cpu', torch.float32, pointwise="squared"),
     ],
-    weights=[1.0],
+    weights=[
+        1.0, 
+        0.1
+    ],
 )
 
 targets = {
-    "llado2025_grad_surgery": target_angles.unsqueeze(0)
+    "llado2025_grad_surgery": target_angles.unsqueeze(0),
+    "LSD": torch.zeros(1, len(lstn_pos))
 }
 
-stim = torch.ones(1,1,1)
+stim = generate_low_pass_stimulus(cutoff_hz=1000, fs=48000, length=512, device='cpu', dtype=torch.float32)
+# stim = torch.ones(1,1,1)
 
-optimizer = torch.optim.Adam(nn.parameters(), lr=0.05)
+optimizer = torch.optim.Adam(nn.parameters(), lr=0.1)
 mtl = create_mtl_optimizer(modelTrainer, mtl_optimizer)
 
 saving_manager = SavingManager(
@@ -765,8 +775,11 @@ for i in range(200):
 
     modelTrainer.compute_estimates(binaural_signals, spk_filters, stim)
     loss_dict = modelTrainer.compute_loss(targets)
-    saving_manager.save("loss_dict", loss_dict)
-    saving_manager.save("modelTrainer.estimates", modelTrainer.estimates)
+    saving_manager.save("loss_dict", {key: value.detach() for key, value in loss_dict.items()})
+    saving_manager.save(
+        "modelTrainer.estimates",
+        {key: value.detach() for key, value in modelTrainer.estimates.items()},
+    )
 
     for model_name, kwargs in modelTrainer.kwargs_output.items():
         if "interauralcues" in kwargs:
@@ -808,7 +821,7 @@ frequency_domain_filters_plot(est_filters, fs=48000)
 saving_manager.save_new_plots("frequency_domain_filters")
 localisation_arrows_plot(
     lstn_pos, spk_pos, loc_np,
-    initial_lsd, lsd_np,
+    np.zeros_like(loc_np), lsd_np,
     target_angle=target_angles.detach().cpu().numpy(),
 )
 saving_manager.save_new_plots("localisation_arrows")
