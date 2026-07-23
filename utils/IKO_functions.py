@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.special import sph_harm
+from scipy.special import sph_harm_y
 
 
 def num_hoa_channels(order: int) -> int:
@@ -31,12 +31,12 @@ def compute_real_sh_matrix(order: int,
     # Loop over degree n and order m
     for n in range(order + 1):
         for m in range(-n, n + 1):
-            # Convert to sph_harm convention: m, n, phi (azimuth), theta (polar)
+            # sph_harm_y convention: n, m, theta (polar), phi (azimuth)
             theta = np.pi / 2.0 - elevations  # polar angle
             phi = azimuths                    # azimuth
 
             # Complex spherical harmonics
-            Y_complex = sph_harm(m, n, phi, theta)  # (K,) complex
+            Y_complex = sph_harm_y(n, m, theta, phi)  # (K,) complex
 
             # Real-valued SH basis (N3D-like): combine real/imag parts
             if m < 0:
