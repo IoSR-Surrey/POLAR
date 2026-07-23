@@ -195,3 +195,112 @@ def test_get_stim_loader_batches_stimuli() -> None:
     assert stim_batch.shape == (batch_size, 1, dataset.n_samples)
     assert stim_batch.dtype == torch.float32
     assert len(loader) == len(dataset) // batch_size
+
+
+@pytest.fixture
+def linear_dataset():
+    return BandpassWhiteNoiseDataset(
+        fs=FS,
+        n_bands=N_BANDS,
+        n_samples_per_band=SAMPLES_PER_BAND,
+        stimulus_length_ms=STIMULUS_LENGTH_MS,
+        ramp_time_ms=RAMP_TIME_MS,
+        band_mode="linear",
+    )
+
+
+def test_linear_band_edges_cover_frequency_range(linear_dataset) -> None:
+    low_freqs, high_freqs = linear_dataset._band_edges()
+
+    assert low_freqs[0] == pytest.approx(linear_dataset.f_min)
+    assert high_freqs[-1] == pytest.approx(linear_dataset.f_max)
+    assert np.allclose(high_freqs[:-1], low_freqs[1:])
+
+    bandwidths = high_freqs - low_freqs
+    assert np.allclose(bandwidths, bandwidths[0])
+
+
+def test_linear_bands_attenuate_out_of_band_frequencies(linear_dataset) -> None:
+    low_freqs, high_freqs = linear_dataset._band_edges()
+
+    for band_idx in range(linear_dataset.n_bands):
+        stim = _first_sample_for_band(linear_dataset, band_idx)[0].numpy()
+        freqs, power = _power_spectrum(stim, linear_dataset.fs)
+
+        low = low_freqs[band_idx]
+        high = high_freqs[band_idx]
+        bandwidth = high - low
+        margin = max(bandwidth * 0.25, 50.0)
+
+        in_band_power = _mean_power_in_range(freqs, power, low, high)
+
+        below_high = max(low - margin, linear_dataset.f_min)
+        if below_high > linear_dataset.f_min:
+            below_band_power = _mean_power_in_range(freqs, power, linear_dataset.f_min, below_high)
+            assert in_band_power > 30.0 * below_band_power
+
+        above_low = min(high + margin, linear_dataset.f_max)
+        if above_low < linear_dataset.f_max:
+            above_band_power = _mean_power_in_range(freqs, power, above_low, linear_dataset.f_max)
+            assert in_band_power > 30.0 * above_band_power
+
+
+def test_invalid_band_mode_raises() -> None:
+    with pytest.raises(ValueError, match="band_mode must be 'erb', 'linear', or 'log'"):
+        BandpassWhiteNoiseDataset(
+            fs=FS,
+            n_bands=4,
+            n_samples_per_band=1,
+            band_mode="octave",
+        )
+
+
+@pytest.fixture
+def log_dataset():
+    return BandpassWhiteNoiseDataset(
+        fs=FS,
+        n_bands=N_BANDS,
+        n_samples_per_band=SAMPLES_PER_BAND,
+        stimulus_length_ms=STIMULUS_LENGTH_MS,
+        ramp_time_ms=RAMP_TIME_MS,
+        band_mode="log",
+    )
+
+
+def test_log_band_edges_cover_frequency_range(log_dataset) -> None:
+    low_freqs, high_freqs = log_dataset._band_edges()
+
+    assert low_freqs[0] == pytest.approx(log_dataset.f_min)
+    assert high_freqs[-1] == pytest.approx(log_dataset.f_max)
+    assert np.allclose(high_freqs[:-1], low_freqs[1:])
+
+    bandwidths = high_freqs - low_freqs
+    assert np.all(bandwidths[1:] > bandwidths[:-1])
+
+    ratios = high_freqs / low_freqs
+    assert np.allclose(ratios, ratios[0])
+
+
+def test_log_bands_attenuate_out_of_band_frequencies(log_dataset) -> None:
+    low_freqs, high_freqs = log_dataset._band_edges()
+
+    for band_idx in range(log_dataset.n_bands):
+        stim = _first_sample_for_band(log_dataset, band_idx)[0].numpy()
+        freqs, power = _power_spectrum(stim, log_dataset.fs)
+
+        low = low_freqs[band_idx]
+        high = high_freqs[band_idx]
+        bandwidth = high - low
+        margin = max(bandwidth * 0.25, 50.0)
+
+        in_band_power = _mean_power_in_range(freqs, power, low, high)
+
+        below_high = max(low - margin, log_dataset.f_min)
+        if below_high > log_dataset.f_min:
+            below_band_power = _mean_power_in_range(freqs, power, log_dataset.f_min, below_high)
+            assert in_band_power > 30.0 * below_band_power
+
+        above_low = min(high + margin, log_dataset.f_max)
+        if above_low < log_dataset.f_max:
+            above_band_power = _mean_power_in_range(freqs, power, above_low, log_dataset.f_max)
+            assert in_band_power > 30.0 * above_band_power

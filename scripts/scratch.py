@@ -68,9 +68,9 @@ cue_model = CueMatchingModel(48000, hrirs, gtfb)
 prop = BinauralFreeFieldPropagation(48000, lstn_pos, spk_pos, sofaile)
 
 n_sources = len(spk_pos)
-n_taps = 32
+n_taps = 1024
 nn = MultiSourceFIR(n_taps, n_sources)
-# nn.set_filter_initialisation("middle")
+nn.set_filter_initialisation("split_cues", fs=48000, n_bands=8, band_mode="log")
 second_moment = SecondMoment(n_taps, n_sources)
 
 modelTrainer = ModelTrainer(
@@ -91,6 +91,7 @@ stim_loader, stim_dataset = get_stim_loader(
     ramp_time_ms=config["stimulus_dataset"]["ramp_time_ms"],
     f_min=config["stimulus_dataset"]["f_min"],
     f_max=config["stimulus_dataset"]["f_max"],
+    band_mode=config["stimulus_dataset"]["band_mode"],
     shuffle=config["training"]["shuffle"],
     num_workers=config["training"]["num_workers"],
     pin_memory=config["training"]["pin_memory"],

@@ -26,7 +26,19 @@ def _raised_cosine_ramp(n_samples, ramp_samples):
 
 
 class BandpassWhiteNoiseDataset(Dataset):
-    def __init__(self, fs, n_bands, n_samples_per_band, stimulus_length_ms = 5, ramp_time_ms = 1, f_min=20.0, f_max=20000.0):
+    def __init__(
+        self,
+        fs,
+        n_bands,
+        n_samples_per_band,
+        stimulus_length_ms=5,
+        ramp_time_ms=1,
+        f_min=20.0,
+        f_max=20000.0,
+        band_mode="erb",
+    ):
+        if band_mode not in ("erb", "linear", "log"):
+            raise ValueError(f"band_mode must be 'erb', 'linear', or 'log', got {band_mode!r}.")
 
         self.fs = fs
         self.n_bands = n_bands
@@ -35,6 +47,7 @@ class BandpassWhiteNoiseDataset(Dataset):
         self.ramp_time_ms = ramp_time_ms
         self.f_min = f_min
         self.f_max = min(f_max, fs / 2 - 1)
+        self.band_mode = band_mode
 
         self.n_samples = int(round(stimulus_length_ms * fs / 1000))
         self.ramp_samples = int(round(ramp_time_ms * fs / 1000))
@@ -52,7 +65,7 @@ class BandpassWhiteNoiseDataset(Dataset):
     def __getitem__(self, idx):
         return self.stimulus[idx]
 
-    def _band_edges(self):
+    def _erb_band_edges(self):
         erb_low = _hz_to_erb_rate(self.f_min)
         erb_high = _hz_to_erb_rate(self.f_max)
         erb_centres = np.linspace(erb_low, erb_high, self.n_bands)
@@ -61,6 +74,21 @@ class BandpassWhiteNoiseDataset(Dataset):
         low_freqs = np.maximum(centre_freqs - bandwidths / 2, 1.0)
         high_freqs = np.minimum(centre_freqs + bandwidths / 2, self.fs / 2 - 1)
         return low_freqs, high_freqs
+
+    def _linear_band_edges(self):
+        edges = np.linspace(self.f_min, self.f_max, self.n_bands + 1)
+        return edges[:-1], edges[1:]
+
+    def _log_band_edges(self):
+        edges = np.geomspace(self.f_min, self.f_max, self.n_bands + 1)
+        return edges[:-1], edges[1:]
+
+    def _band_edges(self):
+        if self.band_mode == "erb":
+            return self._erb_band_edges()
+        if self.band_mode == "linear":
+            return self._linear_band_edges()
+        return self._log_band_edges()
 
     def _bandpass_white_noise(self, low_freq, high_freq, seed):
         rng = np.random.default_rng(seed)
@@ -97,6 +125,7 @@ def get_stim_loader(
     ramp_time_ms=1,
     f_min=20.0,
     f_max=20000.0,
+    band_mode="erb",
     shuffle=True,
     num_workers=0,
     pin_memory=False,
@@ -114,6 +143,7 @@ def get_stim_loader(
         ramp_time_ms=ramp_time_ms,
         f_min=f_min,
         f_max=f_max,
+        band_mode=band_mode,
     )
     loader = DataLoader(
         dataset,

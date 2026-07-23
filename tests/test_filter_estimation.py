@@ -8,8 +8,9 @@ os.chdir(ROOT)
 
 import pytest
 import torch
+import numpy as np
 
-from filter_estimation.model import MultiSourceFIR
+from filter_estimation.model import MultiSourceFIR, _build_split_cues_weights
 
 N_SAMPLES = 64
 N_SOURCES = 3
@@ -77,3 +78,53 @@ def test_getitem_returns_expected_branch() -> None:
 
     assert model[0] is model.branches[0]
     assert model[-1] is model.branches[-1]
+
+
+def test_split_cues_initialisation_assigns_bands_round_robin() -> None:
+    fs = 48000
+    n_bands = 4
+    n_sources = 2
+    model = MultiSourceFIR(N_SAMPLES, n_sources)
+    model.set_filter_initialisation("split_cues", fs=fs, n_bands=n_bands)
+
+    expected = _build_split_cues_weights(N_SAMPLES, n_sources, fs=fs, n_bands=n_bands)
+    for branch_idx, branch in enumerate(model.branches):
+        weight = branch.weight.detach().squeeze(1).numpy()
+        assert weight == pytest.approx(expected[branch_idx])
+        assert np.abs(weight).sum() > 0.0
+
+
+def test_split_cues_log_band_edges_cover_frequency_range() -> None:
+    fs = 48000
+    n_bands = 8
+    f_min = 20.0
+    edges = np.geomspace(f_min, fs / 2, n_bands + 1)
+
+    low_freqs, high_freqs = edges[:-1], edges[1:]
+
+    assert low_freqs[0] == pytest.approx(f_min)
+    assert high_freqs[-1] == pytest.approx(fs / 2)
+    assert np.allclose(high_freqs[:-1], low_freqs[1:])
+
+
+def test_split_cues_log_initialisation_matches_builder() -> None:
+    fs = 48000
+    n_bands = 4
+    n_sources = 2
+    model = MultiSourceFIR(N_SAMPLES, n_sources)
+    model.set_filter_initialisation("split_cues", fs=fs, n_bands=n_bands, band_mode="log")
+
+    expected = _build_split_cues_weights(N_SAMPLES, n_sources, fs=fs, n_bands=n_bands, band_mode="log")
+    for branch_idx, branch in enumerate(model.branches):
+        weight = branch.weight.detach().squeeze(1).numpy()
+        assert weight == pytest.approx(expected[branch_idx])
+    fs = 48000
+    n_bands = 4
+    model = MultiSourceFIR(N_SAMPLES, 2)
+    model.set_filter_initialisation("middle")
+    model.set_filter_initialisation("split_cues", branch_index=1, fs=fs, n_bands=n_bands)
+
+    expected = _build_split_cues_weights(N_SAMPLES, 2, fs=fs, n_bands=n_bands)
+    assert model.branches[1].weight.detach().squeeze(1).numpy() == pytest.approx(expected[1])
+    middle = N_SAMPLES // 2
+    assert model.branches[0].weight.detach()[middle, 0].item() == pytest.approx(1.0)
