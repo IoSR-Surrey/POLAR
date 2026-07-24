@@ -316,13 +316,13 @@ def test_beam_pattern_overlay_peak_matches_main_plot(geometry) -> None:
     weights[1] = -1.0
 
     azimuths, pattern = iko.beam_pattern_over_circle(IKO_ORDER, weights)
-    main_peak_plot_az = float(iko._beam_pattern_plot_azimuths(azimuths)[np.argmax(pattern)])
+    main_peak_plot_az = float(iko._beam_pattern_plot_azimuths(azimuths)[np.argmax(np.abs(pattern))])
 
     az_samples = np.linspace(0.0, 2.0 * np.pi, 360, endpoint=False)
     sh_matrix = compute_real_sh_matrix(IKO_ORDER, az_samples, np.zeros(360))
-    overlay_signed_sum = sh_matrix @ weights.numpy()
+    overlay_pattern = sh_matrix @ weights.numpy()
     overlay_peak_plot_az = float(
-        iko._beam_pattern_plot_azimuths(az_samples)[np.argmax(overlay_signed_sum)]
+        iko._beam_pattern_plot_azimuths(az_samples)[np.argmax(np.abs(overlay_pattern))]
     )
 
     assert main_peak_plot_az == pytest.approx(overlay_peak_plot_az)

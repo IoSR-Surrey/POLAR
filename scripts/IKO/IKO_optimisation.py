@@ -445,7 +445,8 @@ def plot_results(output_dir, order, initial_weights, final_weights, geometry, in
     for ax, weights, label in zip(axes, [initial_weights, final_weights], ["Initial", "Optimised"]):
         azimuths, pattern = beam_pattern_over_circle(order, weights)
         plot_azimuths = _beam_pattern_plot_azimuths(azimuths)
-        ax.plot(plot_azimuths, pattern, label="Pattern")
+        # Use |w·Y| as radius: signed values fold to the opposite angle in polar coords.
+        ax.plot(plot_azimuths, np.abs(pattern), label="Pattern")
         r_lim = max(float(np.max(np.abs(pattern))), 0.1) * 1.1
         ax.plot([plot_listener_az, plot_listener_az], [0, r_lim], color="blue", linestyle="--", linewidth=1.5, label="Listener")
         ax.plot([plot_reflector_az, plot_reflector_az], [0, r_lim], color="gray", linestyle="--", linewidth=1.5, label="Reflector")

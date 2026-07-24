@@ -25,14 +25,23 @@ from plotting.scatter_plots import _add_critical_band_colorbar, _compute_target_
 
 # Optional extra rotation for beam-pattern polar plots only (does not affect SH evaluation).
 _BEAM_PATTERN_PLOT_ROTATION_RAD = 0.0
+# hoa_to_driver physical radiation is π out from raw scipy real-SH azimuths (listening tests:
+# ACN3+ beams to IKO back, ACN1+ to IKO right). Evaluate Y at physical_az + offset so plots
+# and SH losses match the physical IKO frame (az 0 = look / front).
+_PHYSICAL_AZ_TO_MATH_SH_OFFSET_RAD = np.pi
 N_IKO_LOUDSPEAKERS = 20
 IKO_DATA_DIR = Path("data/IKO")
 SPH_TO_DRIVER_NPY = IKO_DATA_DIR / "hoa_to_driver" / "hoa_to_driver.npy"
-BRIR_NPY = IKO_DATA_DIR / "driver_to_vl" / "brir_centre.npy"
+BRIR_NPY = IKO_DATA_DIR / "driver_to_vl" / "brir_centre_v2.npy"
+
+
+def physical_azimuths_to_math_sh(azimuths):
+    """Map IKO-frame (physical) azimuths to the math SH angles used by compute_real_sh_matrix."""
+    return (np.asarray(azimuths, dtype=float) + _PHYSICAL_AZ_TO_MATH_SH_OFFSET_RAD) % (2 * np.pi)
 
 
 def _beam_pattern_plot_azimuths(azimuths):
-    """Rotate scipy azimuth angles for beam-pattern polar display only."""
+    """Rotate IKO-frame azimuth angles for beam-pattern polar display only."""
     return (np.asarray(azimuths, dtype=float) + _BEAM_PATTERN_PLOT_ROTATION_RAD) % (2 * np.pi)
 
 
@@ -258,11 +267,15 @@ def evaluate_localisation(llado_model, binaural_signal, target_angle):
 
 
 def build_pattern_sampling(order, listener_az_rad, reflector_az_rad, half_width_deg, num_points, device, dtype):
-    """Precompute full-circle SH matrix and angular mask for listener/reflector lobes."""
+    """Precompute full-circle SH matrix and angular mask for listener/reflector lobes.
+
+    Azimuths are in the IKO/physical frame; SH rows are evaluated at math angles
+    (physical + offset) so lobe energy matches hoa_to_driver radiation.
+    """
     azimuths = np.linspace(0.0, 2.0 * np.pi, num_points, endpoint=False)
     elevations = np.zeros(num_points)
     sh_matrix_full = torch.from_numpy(
-        compute_real_sh_matrix(order, azimuths, elevations)
+        compute_real_sh_matrix(order, physical_azimuths_to_math_sh(azimuths), elevations)
     ).to(device=device, dtype=dtype)
     azimuth_samples = torch.from_numpy(azimuths).to(device=device, dtype=dtype)
     listener_az = torch.tensor(float(listener_az_rad), device=device, dtype=dtype)
@@ -282,7 +295,8 @@ def compute_directivity_loss(weights, sh_matrix_full, lobe_mask, sh_matrix):
     """Directional loss terms for listener/reflector beam shaping.
 
     Penalises sidelobe energy outside listener/reflector windows and the MVDR-style
-    ratio of sidelobe to in-lobe energy.
+    ratio of sidelobe to in-lobe energy. Matrices must be built in the physical IKO
+    frame (see physical_azimuths_to_math_sh).
     """
     pattern = sh_matrix_full @ weights
     lobe_energy = pattern[lobe_mask].pow(2).mean()
@@ -293,13 +307,17 @@ def compute_directivity_loss(weights, sh_matrix_full, lobe_mask, sh_matrix):
 
 
 def build_vertical_sampling(order, elevation_deg, num_azimuths, device, dtype):
-    """Precompute SH matrix at non-zero elevations over full azimuth."""
+    """Precompute SH matrix at non-zero elevations over full azimuth (physical IKO frame)."""
     elevation_deg = np.asarray(elevation_deg, dtype=float).reshape(-1)
     elevations_rad = np.deg2rad(elevation_deg)
     azimuths = np.linspace(0.0, 2.0 * np.pi, num_azimuths, endpoint=False)
     azimuth_grid, elevation_grid = np.meshgrid(azimuths, elevations_rad, indexing="ij")
     sh_matrix_vertical = torch.from_numpy(
-        compute_real_sh_matrix(order, azimuth_grid.ravel(), elevation_grid.ravel())
+        compute_real_sh_matrix(
+            order,
+            physical_azimuths_to_math_sh(azimuth_grid.ravel()),
+            elevation_grid.ravel(),
+        )
     ).to(device=device, dtype=dtype)
     return sh_matrix_vertical
 
@@ -325,10 +343,10 @@ def compute_vertical_radiation_loss(weights, sh_matrix_vertical):
 
 
 def beam_pattern_over_circle(order, weights, num_points=360):
-    """Full horizontal beam pattern for plotting."""
+    """Full horizontal beam pattern in the physical IKO frame (az 0 = look / front)."""
     azimuths = np.linspace(0.0, 2.0 * np.pi, num_points, endpoint=False)
     elevations = np.zeros(num_points)
-    Y = compute_real_sh_matrix(order, azimuths, elevations)
+    Y = compute_real_sh_matrix(order, physical_azimuths_to_math_sh(azimuths), elevations)
     w = weights.detach().cpu().numpy().reshape(-1)
     return azimuths, Y @ w
 
@@ -425,7 +443,7 @@ def plot_beam_pattern_overlay(order, weights, listener_az, reflector_az, plots_d
     azimuths = np.linspace(0.0, 2.0 * np.pi, num_points, endpoint=False)
     plot_azimuths = _beam_pattern_plot_azimuths(azimuths)
     elevations = np.zeros(num_points)
-    sh_matrix = compute_real_sh_matrix(order, azimuths, elevations)
+    sh_matrix = compute_real_sh_matrix(order, physical_azimuths_to_math_sh(azimuths), elevations)
 
     fig, axes = plt.subplots(2, 2, subplot_kw={"projection": "polar"}, figsize=(12, 12))
     axes = axes.ravel()
@@ -474,7 +492,8 @@ def plot_results(output_dir, order, initial_weights, final_weights, geometry, in
     for ax, weights, label in zip(axes, [initial_weights, final_weights], ["Initial", "Optimised"]):
         azimuths, pattern = beam_pattern_over_circle(order, weights)
         plot_azimuths = _beam_pattern_plot_azimuths(azimuths)
-        ax.plot(plot_azimuths, pattern, label="Pattern")
+        # Use |w·Y| as radius: signed values fold to the opposite angle in polar coords.
+        ax.plot(plot_azimuths, np.abs(pattern), label="Pattern")
         r_lim = max(float(np.max(np.abs(pattern))), 0.1) * 1.1
         ax.plot([plot_listener_az, plot_listener_az], [0, r_lim], color="blue", linestyle="--", linewidth=1.5, label="Listener")
         ax.plot([plot_reflector_az, plot_reflector_az], [0, r_lim], color="gray", linestyle="--", linewidth=1.5, label="Reflector")
@@ -562,7 +581,7 @@ def main():
     sh_matrix = torch.from_numpy(
         compute_real_sh_matrix(
             iko_order,
-            geometry["sh_azimuths_rad"].numpy(),
+            physical_azimuths_to_math_sh(geometry["sh_azimuths_rad"].numpy()),
             geometry["sh_elevations_rad"].numpy(),
         )
     ).to(device=device, dtype=dtype)
@@ -631,10 +650,10 @@ def main():
         vertical_loss = compute_vertical_radiation_loss(weights, sh_matrix_vertical)
         total_loss = (
             loss
-            + 0.0 * l1_loss
-            + 0.0 * sidelobe_loss
-            + 0.0 * directivity_loss
-            + 0.0 * vertical_loss
+            + lambda_l1 * l1_loss
+            + lambda_sidelobe * sidelobe_loss
+            + lambda_directivity * directivity_loss
+            + lambda_vertical * vertical_loss
         )
         total_loss.backward()
         optimizer.step()

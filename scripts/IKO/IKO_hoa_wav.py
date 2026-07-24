@@ -17,7 +17,9 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts" / "IKO"))
 os.chdir(ROOT)
 
-spec = importlib.util.spec_from_file_location("iko_optimisation", ROOT / "scripts" / "IKO" / "IKO_optimisation.py")
+spec = importlib.util.spec_from_file_location(
+    "iko_brir_optimisation", ROOT / "scripts" / "IKO" / "IKO_brir_optimisation.py",
+)
 iko = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(iko)
 
@@ -185,7 +187,8 @@ def plot_beam_pattern(order, weights, plots_dir, listener_az=None, reflector_az=
 
     fig, ax = plt.subplots(subplot_kw={"projection": "polar"}, figsize=(6, 6))
     plot_azimuths = iko._beam_pattern_plot_azimuths(azimuths)
-    ax.plot(plot_azimuths, pattern, label="Pattern")
+    # Use |w·Y| as radius: signed values fold to the opposite angle in polar coords.
+    ax.plot(plot_azimuths, np.abs(pattern), label="Pattern")
     r_lim = max(float(np.max(np.abs(pattern))), 0.1) * 1.1
     if listener_az is not None:
         plot_listener_az = float(iko._beam_pattern_plot_azimuths(listener_az))

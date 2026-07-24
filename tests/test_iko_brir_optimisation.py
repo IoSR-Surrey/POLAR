@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-from utils.IKO_functions import num_hoa_channels
+from utils.IKO_functions import compute_real_sh_matrix, num_hoa_channels
 
 IKO_ORDER = 3
 N_CHANNELS = num_hoa_channels(IKO_ORDER)
@@ -172,3 +172,53 @@ def test_fingerprint_summary_plot_writes_file(real_sph_to_driver, tmp_path) -> N
     fig.savefig(output_path, dpi=120)
     plt.close(fig)
     assert output_path.is_file()
+
+
+def test_physical_frame_omni_plus_acn3_peaks_at_iko_back() -> None:
+    """omni+ACN3 matches listening: cardioid-like peak at IKO back (π)."""
+    weights = torch.zeros(N_CHANNELS, dtype=DTYPE)
+    weights[0] = 1.0
+    weights[3] = 1.0
+    azimuths, pattern = iko_brir.beam_pattern_over_circle(IKO_ORDER, weights, num_points=360)
+    peak_az = float(azimuths[np.argmax(np.abs(pattern))])
+    assert peak_az == pytest.approx(np.pi, abs=np.deg2rad(1.0))
+
+
+def test_physical_frame_omni_plus_acn1_peaks_at_iko_right() -> None:
+    """omni+ACN1 matches listening: cardioid-like peak at IKO right (3π/2)."""
+    weights = torch.zeros(N_CHANNELS, dtype=DTYPE)
+    weights[0] = 1.0
+    weights[1] = 1.0
+    azimuths, pattern = iko_brir.beam_pattern_over_circle(IKO_ORDER, weights, num_points=360)
+    peak_az = float(azimuths[np.argmax(np.abs(pattern))])
+    assert peak_az == pytest.approx(1.5 * np.pi, abs=np.deg2rad(1.0))
+
+
+def test_directivity_lobe_uses_physical_frame_listener_direction() -> None:
+    """Listener at IKO front prefers omni-ACN3 (physical front) over omni+ACN3 (back)."""
+    listener_az = 0.0  # IKO front
+    reflector_az = np.pi / 2.0
+    sh_matrix_full, lobe_mask = iko_brir.build_pattern_sampling(
+        IKO_ORDER, listener_az, reflector_az, 5.0, 360, DEVICE, DTYPE,
+    )
+    sh_matrix = torch.from_numpy(
+        compute_real_sh_matrix(
+            IKO_ORDER,
+            iko_brir.physical_azimuths_to_math_sh(np.array([listener_az, reflector_az])),
+            np.zeros(2),
+        )
+    ).to(dtype=DTYPE)
+
+    weights_front = torch.zeros(N_CHANNELS, dtype=DTYPE)
+    weights_front[0] = 1.0
+    weights_front[3] = -1.0
+    _, _, gains_front, lobe_front = iko_brir.compute_directivity_loss(
+        weights_front, sh_matrix_full, lobe_mask, sh_matrix,
+    )
+    weights_back = weights_front.clone()
+    weights_back[3] = 1.0
+    _, _, gains_back, lobe_back = iko_brir.compute_directivity_loss(
+        weights_back, sh_matrix_full, lobe_mask, sh_matrix,
+    )
+    assert float(gains_front[0]) > float(gains_back[0])
+    assert float(lobe_front) > float(lobe_back)
