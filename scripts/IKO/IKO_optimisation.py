@@ -229,7 +229,10 @@ def evaluate_localisation(llado_model, binaural_signal, target_angle):
 
 
 def build_pattern_sampling(order, listener_az_rad, reflector_az_rad, half_width_deg, num_points, device, dtype):
-    """Precompute full-circle SH matrix and angular mask for listener/reflector lobes."""
+    """Precompute full-circle SH matrix and separate listener/reflector lobe masks.
+
+    Returns (sh_matrix_full, listener_mask, reflector_mask).
+    """
     azimuths = np.linspace(0.0, 2.0 * np.pi, num_points, endpoint=False)
     elevations = np.zeros(num_points)
     sh_matrix_full = torch.from_numpy(
@@ -245,22 +248,34 @@ def build_pattern_sampling(order, listener_az_rad, reflector_az_rad, half_width_
     dist_reflector = torch.atan2(
         torch.sin(azimuth_samples - reflector_az), torch.cos(azimuth_samples - reflector_az),
     ).abs()
-    lobe_mask = (dist_listener <= half_width) | (dist_reflector <= half_width)
-    return sh_matrix_full, lobe_mask
+    listener_mask = dist_listener <= half_width
+    reflector_mask = dist_reflector <= half_width
+    return sh_matrix_full, listener_mask, reflector_mask
 
 
-def compute_directivity_loss(weights, sh_matrix_full, lobe_mask, sh_matrix):
-    """Directional loss terms for listener/reflector beam shaping.
+def compute_directivity_loss(weights, sh_matrix_full, listener_mask, reflector_mask, sh_matrix):
+    """Separate listener/reflector directivity losses with a shared sidelobe region.
 
-    Penalises sidelobe energy outside listener/reflector windows and the MVDR-style
-    ratio of sidelobe to in-lobe energy.
+    Sidelobes are angles outside both windows, so each direction's in-lobe energy
+    ignores the other window and neither loss treats the other direction as a sidelobe.
+    Returns sidelobe_energy, listener_directivity, reflector_directivity, gains,
+    listener_lobe_energy, reflector_lobe_energy.
     """
     pattern = sh_matrix_full @ weights
-    lobe_energy = pattern[lobe_mask].pow(2).mean()
-    sidelobe_energy = pattern[~lobe_mask].pow(2).mean()
-    directivity_loss = sidelobe_energy / (lobe_energy + 1e-6)
+    listener_lobe_energy = pattern[listener_mask].pow(2).mean()
+    reflector_lobe_energy = pattern[reflector_mask].pow(2).mean()
+    sidelobe_energy = pattern[~(listener_mask | reflector_mask)].pow(2).mean()
+    listener_directivity_loss = sidelobe_energy / (listener_lobe_energy + 1e-6)
+    reflector_directivity_loss = sidelobe_energy / (reflector_lobe_energy + 1e-6)
     directional_gains = sh_matrix @ weights
-    return sidelobe_energy, directivity_loss, directional_gains, lobe_energy
+    return (
+        sidelobe_energy,
+        listener_directivity_loss,
+        reflector_directivity_loss,
+        directional_gains,
+        listener_lobe_energy,
+        reflector_lobe_energy,
+    )
 
 
 def build_vertical_sampling(order, elevation_deg, num_azimuths, device, dtype):
@@ -533,7 +548,7 @@ def main():
             geometry["sh_elevations_rad"].numpy(),
         )
     ).to(device=device, dtype=dtype)
-    sh_matrix_full, lobe_mask = build_pattern_sampling(
+    sh_matrix_full, listener_mask, reflector_mask = build_pattern_sampling(
         iko_order,
         float(geometry["sh_azimuths_rad"][0]),
         float(geometry["sh_azimuths_rad"][1]),
@@ -561,7 +576,8 @@ def main():
     weight_model.weight.data[0, 0] = 1.0  # omnidirectional (0th-order) SH only
     optimizer = torch.optim.Adam(weight_model.parameters(), lr=lr)
 
-    signal = torch.randn(1, 256, device=device, dtype=dtype)
+    signal = torch.zeros(1, 256, device=device, dtype=dtype)
+    signal[0, 0] = 1.0  # unit impulse (deterministic stimulus)
     target = torch.tensor(target_angle, device=device, dtype=dtype)
 
     with torch.no_grad():
@@ -572,8 +588,15 @@ def main():
         )
         initial_azimuth, initial_loss = evaluate_localisation(llado_model, initial_binaural, target)
         initial_l1_loss = torch.nn.functional.l1_loss(initial_weights, torch.zeros_like(initial_weights))
-        initial_sidelobe_loss, initial_directivity_loss, initial_gains, initial_lobe_energy = compute_directivity_loss(
-            initial_weights, sh_matrix_full, lobe_mask, sh_matrix,
+        (
+            initial_sidelobe_loss,
+            initial_listener_directivity_loss,
+            initial_reflector_directivity_loss,
+            initial_gains,
+            initial_listener_lobe_energy,
+            initial_reflector_lobe_energy,
+        ) = compute_directivity_loss(
+            initial_weights, sh_matrix_full, listener_mask, reflector_mask, sh_matrix,
         )
         initial_vertical_loss = compute_vertical_radiation_loss(initial_weights, sh_matrix_vertical)
         save_run_artifacts(
@@ -585,7 +608,9 @@ def main():
     print(
         f"Initial azimuth: {initial_azimuth.item():.2f}°, loc loss: {initial_loss.item():.4f}, "
         f"L1 loss: {initial_l1_loss.item():.4f}, "
-        f"sidelobe loss: {initial_sidelobe_loss.item():.4f}, directivity loss: {initial_directivity_loss.item():.4f}, "
+        f"sidelobe loss: {initial_sidelobe_loss.item():.4f}, "
+        f"listener dir: {initial_listener_directivity_loss.item():.4f}, "
+        f"reflector dir: {initial_reflector_directivity_loss.item():.4f}, "
         f"vertical loss: {initial_vertical_loss.item():.4f}, "
         f"beam gains: listener={initial_gains[0].item():.3f}, reflector={initial_gains[1].item():.3f}"
     )
@@ -600,15 +625,22 @@ def main():
         _, loss = evaluate_localisation(llado_model, binaural_signal, target)
 
         l1_loss = torch.nn.functional.l1_loss(weights, torch.zeros_like(weights))
-        sidelobe_loss, directivity_loss, _, _ = compute_directivity_loss(
-            weights, sh_matrix_full, lobe_mask, sh_matrix,
+        (
+            sidelobe_loss,
+            listener_directivity_loss,
+            reflector_directivity_loss,
+            _,
+            _,
+            _,
+        ) = compute_directivity_loss(
+            weights, sh_matrix_full, listener_mask, reflector_mask, sh_matrix,
         )
         vertical_loss = compute_vertical_radiation_loss(weights, sh_matrix_vertical)
         total_loss = (
             loss
             + 0.0 * l1_loss
             + 0.0 * sidelobe_loss
-            + 0.0 * directivity_loss
+            + 0.0 * (listener_directivity_loss + reflector_directivity_loss)
             + lambda_vertical * vertical_loss
         )
         total_loss.backward()
@@ -616,17 +648,27 @@ def main():
         if (epoch + 1) % 10 == 0 or epoch == 0:
             with torch.no_grad():
                 azimuth, _ = evaluate_localisation(llado_model, binaural_signal, target)
-                _, _, gains, lobe_energy = compute_directivity_loss(
-                    weights, sh_matrix_full, lobe_mask, sh_matrix,
+                (
+                    _,
+                    _,
+                    _,
+                    gains,
+                    listener_lobe_energy,
+                    reflector_lobe_energy,
+                ) = compute_directivity_loss(
+                    weights, sh_matrix_full, listener_mask, reflector_mask, sh_matrix,
                 )
             print(
                 f"Epoch {epoch + 1}/{n_epochs}, loc loss: {loss.item():.4f}, "
                 f"L1 loss: {l1_loss.item():.4f}, "
-                f"sidelobe loss: {sidelobe_loss.item():.4f}, directivity loss: {directivity_loss.item():.4f}, "
+                f"sidelobe loss: {sidelobe_loss.item():.4f}, "
+                f"listener dir: {listener_directivity_loss.item():.4f}, "
+                f"reflector dir: {reflector_directivity_loss.item():.4f}, "
                 f"vertical loss: {vertical_loss.item():.4f}, "
                 f"total loss: {total_loss.item():.4f}, azimuth: {azimuth.item():.2f}°, "
                 f"beam gains: listener={gains[0].item():.3f}, reflector={gains[1].item():.3f}, "
-                f"lobe energy: {lobe_energy.item():.4f}"
+                f"lobe energy: listener={listener_lobe_energy.item():.4f}, "
+                f"reflector={reflector_lobe_energy.item():.4f}"
             )
 
     with torch.no_grad():
@@ -637,8 +679,15 @@ def main():
         )
         final_azimuth, final_loss = evaluate_localisation(llado_model, final_binaural, target)
         final_l1_loss = torch.nn.functional.l1_loss(final_weights, torch.zeros_like(final_weights))
-        final_sidelobe_loss, final_directivity_loss, final_gains, final_lobe_energy = compute_directivity_loss(
-            final_weights, sh_matrix_full, lobe_mask, sh_matrix,
+        (
+            final_sidelobe_loss,
+            final_listener_directivity_loss,
+            final_reflector_directivity_loss,
+            final_gains,
+            final_listener_lobe_energy,
+            final_reflector_lobe_energy,
+        ) = compute_directivity_loss(
+            final_weights, sh_matrix_full, listener_mask, reflector_mask, sh_matrix,
         )
         final_vertical_loss = compute_vertical_radiation_loss(final_weights, sh_matrix_vertical)
         save_run_artifacts(
@@ -650,10 +699,14 @@ def main():
     print(
         f"Final azimuth: {final_azimuth.item():.2f}°, loc loss: {final_loss.item():.4f}, "
         f"L1 loss: {final_l1_loss.item():.4f}, "
-        f"sidelobe loss: {final_sidelobe_loss.item():.4f}, directivity loss: {final_directivity_loss.item():.4f}, "
+        f"sidelobe loss: {final_sidelobe_loss.item():.4f}, "
+        f"listener dir: {final_listener_directivity_loss.item():.4f}, "
+        f"reflector dir: {final_reflector_directivity_loss.item():.4f}, "
         f"vertical loss: {final_vertical_loss.item():.4f} "
         f"(target: {target_angle}°), beam gains: listener={final_gains[0].item():.3f}, "
-        f"reflector={final_gains[1].item():.3f}, lobe energy: {final_lobe_energy.item():.4f}"
+        f"reflector={final_gains[1].item():.3f}, "
+        f"lobe energy: listener={final_listener_lobe_energy.item():.4f}, "
+        f"reflector={final_reflector_lobe_energy.item():.4f}"
     )
 
     plot_results(
