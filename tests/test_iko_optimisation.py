@@ -217,21 +217,24 @@ def test_beam_pattern_over_circle_is_flat_for_omni_weights() -> None:
 def test_build_pattern_sampling_marks_listener_and_reflector_directions(geometry) -> None:
     listener_az = float(geometry["sh_azimuths_rad"][0])
     reflector_az = float(geometry["sh_azimuths_rad"][1])
-    sh_matrix_full, lobe_mask = iko.build_pattern_sampling(
+    sh_matrix_full, listener_mask, reflector_mask = iko.build_pattern_sampling(
         IKO_ORDER, listener_az, reflector_az, 20.0, 360, DEVICE, DTYPE,
     )
 
     assert sh_matrix_full.shape == (360, num_hoa_channels(IKO_ORDER))
-    assert lobe_mask.shape == (360,)
-    assert lobe_mask.any()
-    assert (~lobe_mask).any()
+    assert listener_mask.shape == (360,)
+    assert reflector_mask.shape == (360,)
+    assert listener_mask.any()
+    assert reflector_mask.any()
+    assert (~(listener_mask | reflector_mask)).any()
+    assert not (listener_mask & reflector_mask).any()
 
 
 def test_compute_directivity_loss_matches_manual_components(geometry) -> None:
     weights = torch.tensor([1.0, 0.2, -0.1] + [0.0] * 13, dtype=DTYPE)
     listener_az = float(geometry["sh_azimuths_rad"][0])
     reflector_az = float(geometry["sh_azimuths_rad"][1])
-    sh_matrix_full, lobe_mask = iko.build_pattern_sampling(
+    sh_matrix_full, listener_mask, reflector_mask = iko.build_pattern_sampling(
         IKO_ORDER, listener_az, reflector_az, 20.0, 360, DEVICE, DTYPE,
     )
     sh_matrix = torch.from_numpy(
@@ -242,18 +245,29 @@ def test_compute_directivity_loss_matches_manual_components(geometry) -> None:
         )
     ).to(dtype=DTYPE)
 
-    sidelobe_loss, directivity_loss, gains, lobe_energy = iko.compute_directivity_loss(
-        weights, sh_matrix_full, lobe_mask, sh_matrix,
+    (
+        sidelobe_loss,
+        listener_directivity_loss,
+        reflector_directivity_loss,
+        gains,
+        listener_lobe_energy,
+        reflector_lobe_energy,
+    ) = iko.compute_directivity_loss(
+        weights, sh_matrix_full, listener_mask, reflector_mask, sh_matrix,
     )
     pattern = sh_matrix_full @ weights
-    expected_sidelobe = pattern[~lobe_mask].pow(2).mean()
-    expected_lobe = pattern[lobe_mask].pow(2).mean()
-    expected_ratio = expected_sidelobe / (expected_lobe + 1e-6)
+    expected_sidelobe = pattern[~(listener_mask | reflector_mask)].pow(2).mean()
+    expected_listener_lobe = pattern[listener_mask].pow(2).mean()
+    expected_reflector_lobe = pattern[reflector_mask].pow(2).mean()
+    expected_listener_ratio = expected_sidelobe / (expected_listener_lobe + 1e-6)
+    expected_reflector_ratio = expected_sidelobe / (expected_reflector_lobe + 1e-6)
 
     torch.testing.assert_close(gains, sh_matrix @ weights)
     torch.testing.assert_close(sidelobe_loss, expected_sidelobe)
-    torch.testing.assert_close(lobe_energy, expected_lobe)
-    torch.testing.assert_close(directivity_loss, expected_ratio)
+    torch.testing.assert_close(listener_lobe_energy, expected_listener_lobe)
+    torch.testing.assert_close(reflector_lobe_energy, expected_reflector_lobe)
+    torch.testing.assert_close(listener_directivity_loss, expected_listener_ratio)
+    torch.testing.assert_close(reflector_directivity_loss, expected_reflector_ratio)
 
 
 def test_expand_vertical_elevations_deg_mirrors_positive_angles() -> None:

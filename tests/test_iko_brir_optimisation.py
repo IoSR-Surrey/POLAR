@@ -198,7 +198,7 @@ def test_directivity_lobe_uses_physical_frame_listener_direction() -> None:
     """Listener at IKO front prefers omni-ACN3 (physical front) over omni+ACN3 (back)."""
     listener_az = 0.0  # IKO front
     reflector_az = np.pi / 2.0
-    sh_matrix_full, lobe_mask = iko_brir.build_pattern_sampling(
+    sh_matrix_full, listener_mask, reflector_mask = iko_brir.build_pattern_sampling(
         IKO_ORDER, listener_az, reflector_az, 5.0, 360, DEVICE, DTYPE,
     )
     sh_matrix = torch.from_numpy(
@@ -212,13 +212,13 @@ def test_directivity_lobe_uses_physical_frame_listener_direction() -> None:
     weights_front = torch.zeros(N_CHANNELS, dtype=DTYPE)
     weights_front[0] = 1.0
     weights_front[3] = -1.0
-    _, _, gains_front, lobe_front = iko_brir.compute_directivity_loss(
-        weights_front, sh_matrix_full, lobe_mask, sh_matrix,
+    _, _, _, gains_front, lobe_front, _ = iko_brir.compute_directivity_loss(
+        weights_front, sh_matrix_full, listener_mask, reflector_mask, sh_matrix,
     )
     weights_back = weights_front.clone()
     weights_back[3] = 1.0
-    _, _, gains_back, lobe_back = iko_brir.compute_directivity_loss(
-        weights_back, sh_matrix_full, lobe_mask, sh_matrix,
+    _, _, _, gains_back, lobe_back, _ = iko_brir.compute_directivity_loss(
+        weights_back, sh_matrix_full, listener_mask, reflector_mask, sh_matrix,
     )
     assert float(gains_front[0]) > float(gains_back[0])
     assert float(lobe_front) > float(lobe_back)

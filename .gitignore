@@ -251,3 +251,5 @@ two_loudspeaker_directivity.py
 *.gif
 
 .cursorrules
+
+*.mat
