@@ -20,6 +20,7 @@ os.chdir(ROOT)
 from utils.IKO_functions import compute_real_sh_matrix, num_hoa_channels
 from utils.miscellaneous import load_npy_to_torch
 from utils.sofa_functions import load_sofa, get_template_for_llado2025_desena_2020
+from models.cagrad import CAGrad
 from models.listener_based.llado2025.model import llado2025_grad_surgery
 
 
@@ -53,7 +54,7 @@ def cosine_similarity(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
 
 
-def run_optimisation(iko_brir, signal, shared, n_epochs, lr, target, lambdas):
+def run_optimisation(iko_brir, signal, shared, n_epochs, lr, target, lambdas, cagrad=None):
     device = shared["device"]
     dtype = shared["dtype"]
     n_eigenbeams = shared["n_eigenbeams"]
@@ -92,16 +93,25 @@ def run_optimisation(iko_brir, signal, shared, n_epochs, lr, target, lambdas):
             shared["reflector_mask"],
             shared["sh_matrix"],
         )
-        vertical_loss = iko_brir.compute_vertical_radiation_loss(weights, shared["sh_matrix_vertical"])
-        total_loss = (
-            lambdas["loc"] * loss
-            + lambdas["l1"] * l1_loss
-            + lambdas["sidelobe"] * sidelobe_loss
-            + lambdas["directivity"] * (listener_directivity_loss + reflector_directivity_loss)
-            + lambdas["vertical"] * vertical_loss
+        sparsity_loss, target_energy_loss = iko_brir.compute_pattern_sparsity_loss(
+            weights,
+            shared["sh_matrix_full"],
+            shared["listener_mask"],
+            shared["reflector_mask"],
         )
-        total_loss.backward()
-        optimizer.step()
+        vertical_loss = iko_brir.compute_vertical_radiation_loss(weights, shared["sh_matrix_vertical"])
+        losses = {
+            "loc": loss,
+            "l1": l1_loss,
+            "sidelobe": sidelobe_loss,
+            "directivity": listener_directivity_loss + reflector_directivity_loss,
+            "sparsity": sparsity_loss,
+            "target_energy": target_energy_loss,
+            "vertical": vertical_loss,
+        }
+        weighted_losses = iko_brir.build_iko_weighted_loss_dict(lambdas, losses)
+        total_loss = iko_brir.iko_total_loss(lambdas, losses)
+        iko_brir.apply_iko_optim_step(optimizer, weight_model, weighted_losses, total_loss, cagrad)
 
     with torch.no_grad():
         final_weights = weight_model(torch.ones(1, 1, device=device, dtype=dtype)).reshape(-1)
@@ -141,8 +151,15 @@ def main():
         "l1": iko_config["lambda_l1"],
         "sidelobe": iko_config["lambda_sidelobe"],
         "directivity": iko_config["lambda_directivity"],
+        "sparsity": iko_config["lambda_sparsity"],
+        "target_energy": iko_config["lambda_target_energy"],
         "vertical": iko_config.get("lambda_vertical", 0.0),
     }
+    use_cagrad = iko_config.get("use_cagrad", False)
+    cagrad_c = float(config["training"].get("cagrad_c", 0.5))
+    active_tasks = [name for name, weight in lambdas.items() if weight != 0.0]
+    cagrad = CAGrad(active_tasks, c=cagrad_c) if use_cagrad else None
+    print(f"Optimiser step: {'CAGrad (c=' + str(cagrad_c) + ', tasks=' + str(active_tasks) + ')' if use_cagrad else 'plain weighted sum'}")
 
     iko_order = 3
     n_eigenbeams = num_hoa_channels(iko_order)
@@ -217,7 +234,7 @@ def main():
     for seed in seeds:
         torch.manual_seed(seed)
         signal = torch.randn(1, args.signal_length, device=device, dtype=dtype)
-        out = run_optimisation(iko_brir, signal, shared, args.n_epochs, lr, target, lambdas)
+        out = run_optimisation(iko_brir, signal, shared, args.n_epochs, lr, target, lambdas, cagrad)
         out["seed"] = seed
         results.append(out)
         print(

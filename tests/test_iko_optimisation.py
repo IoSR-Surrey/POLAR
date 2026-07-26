@@ -270,6 +270,27 @@ def test_compute_directivity_loss_matches_manual_components(geometry) -> None:
     torch.testing.assert_close(reflector_directivity_loss, expected_reflector_ratio)
 
 
+def test_compute_pattern_sparsity_loss_matches_manual_components(geometry) -> None:
+    weights = torch.tensor([1.0, 0.2, -0.1] + [0.0] * 13, dtype=DTYPE)
+    listener_az = float(geometry["sh_azimuths_rad"][0])
+    reflector_az = float(geometry["sh_azimuths_rad"][1])
+    sh_matrix_full, listener_mask, reflector_mask = iko.build_pattern_sampling(
+        IKO_ORDER, listener_az, reflector_az, 20.0, 360, DEVICE, DTYPE,
+    )
+
+    sparsity_loss, target_energy_loss = iko.compute_pattern_sparsity_loss(
+        weights, sh_matrix_full, listener_mask, reflector_mask,
+    )
+    pattern = sh_matrix_full @ weights
+    expected_sparsity = pattern.abs().sum() / pattern.pow(2).sum().sqrt().clamp_min(1e-6)
+    expected_listener_lobe = pattern[listener_mask].pow(2).mean()
+    expected_reflector_lobe = pattern[reflector_mask].pow(2).mean()
+    expected_target_energy = 1.0 / (expected_listener_lobe + 1e-6) + 1.0 / (expected_reflector_lobe + 1e-6)
+
+    torch.testing.assert_close(sparsity_loss, expected_sparsity)
+    torch.testing.assert_close(target_energy_loss, expected_target_energy)
+
+
 def test_expand_vertical_elevations_deg_mirrors_positive_angles() -> None:
     elevations = iko.expand_vertical_elevations_deg([30.0, 60.0, 90.0])
     np.testing.assert_allclose(elevations, [-90.0, -60.0, -30.0, 30.0, 60.0, 90.0])

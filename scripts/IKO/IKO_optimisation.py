@@ -19,6 +19,7 @@ from propagation.helpers import _calculate_source_angle_2D
 from utils.IKO_functions import compute_real_sh_matrix, num_hoa_channels
 from utils.miscellaneous import load_npy_to_torch
 from utils.sofa_functions import load_sofa, get_template_for_llado2025_desena_2020, get_IRs, sofa_find
+from models.cagrad import CAGrad
 from models.listener_based.llado2025.model import llado2025_grad_surgery
 from plotting.scatter_plots import _add_critical_band_colorbar, _compute_target_itd_ild, _scatter_itd_ild_from_arrays
 
@@ -30,6 +31,29 @@ _BEAM_PATTERN_PLOT_ROTATION_RAD = 0.0
 def _beam_pattern_plot_azimuths(azimuths):
     """Rotate scipy azimuth angles for beam-pattern polar display only."""
     return (np.asarray(azimuths, dtype=float) + _BEAM_PATTERN_PLOT_ROTATION_RAD) % (2 * np.pi)
+
+
+def build_iko_weighted_loss_dict(lambdas, losses):
+    """Build lambda-weighted task losses, dropping tasks with zero weight."""
+    return {name: lambdas[name] * losses[name] for name in losses if lambdas[name] != 0.0}
+
+
+def iko_total_loss(lambdas, losses):
+    """Sum of lambda-weighted losses (includes zero-weight terms for logging)."""
+    total = None
+    for name in losses:
+        term = lambdas[name] * losses[name]
+        total = term if total is None else total + term
+    return total
+
+
+def apply_iko_optim_step(optimizer, weight_model, weighted_losses, total_loss, cagrad=None):
+    """Update weights via CAGrad (if given) or plain summed-loss backward."""
+    if cagrad is not None:
+        cagrad.step(weighted_losses, list(weight_model.parameters()), optimizer)
+    else:
+        total_loss.backward()
+        optimizer.step()
 
 
 def setup_geometry(d, iko_angle_deg, reflector_angle_deg, listener_positions, fs, c=343.0, iko_look_direction_deg=180.0):
@@ -278,6 +302,23 @@ def compute_directivity_loss(weights, sh_matrix_full, listener_mask, reflector_m
     )
 
 
+def compute_pattern_sparsity_loss(weights, sh_matrix_full, listener_mask, reflector_mask):
+    """Scale-invariant angular sparsity ||p||_1 / ||p||_2 plus target-lobe energy loss.
+
+    Sparsity encourages few active azimuths. Target energy anchors energy at the
+    listener and reflector windows so sparsity does not collapse the pattern to zero
+    or a single unrelated peak.
+    Returns sparsity_loss, target_energy_loss.
+    """
+    pattern = sh_matrix_full @ weights
+    pattern_l2 = pattern.pow(2).sum().sqrt().clamp_min(1e-6)
+    sparsity_loss = pattern.abs().sum() / pattern_l2
+    listener_lobe_energy = pattern[listener_mask].pow(2).mean()
+    reflector_lobe_energy = pattern[reflector_mask].pow(2).mean()
+    target_energy_loss = 1.0 / (listener_lobe_energy + 1e-6) + 1.0 / (reflector_lobe_energy + 1e-6)
+    return sparsity_loss, target_energy_loss
+
+
 def build_vertical_sampling(order, elevation_deg, num_azimuths, device, dtype):
     """Precompute SH matrix at non-zero elevations over full azimuth."""
     elevation_deg = np.asarray(elevation_deg, dtype=float).reshape(-1)
@@ -516,14 +557,22 @@ def main():
     lr = 0.01
     target_angle = config["training"]["target_angle"]
     iko_config = config["iko"]
-    lambda_l1 = iko_config["lambda_l1"]
-    lambda_sidelobe = iko_config["lambda_sidelobe"]
-    lambda_directivity = iko_config["lambda_directivity"]
     lobe_half_width_deg = iko_config["lobe_half_width_deg"]
     pattern_num_points = iko_config["pattern_num_points"]
     lambda_vertical = iko_config.get("lambda_vertical", 0.0)
     vertical_elevation_deg = iko_config.get("vertical_elevation_deg", [30.0, 60.0, 90.0])
     vertical_num_azimuths = iko_config.get("vertical_num_azimuths", pattern_num_points)
+    use_cagrad = iko_config.get("use_cagrad", False)
+    cagrad_c = float(config["training"].get("cagrad_c", 0.5))
+    lambdas = {
+        "loc": iko_config.get("lambda_loc", 1.0),
+        "l1": iko_config.get("lambda_l1", 0.0),
+        "sidelobe": iko_config.get("lambda_sidelobe", 0.0),
+        "directivity": iko_config.get("lambda_directivity", 1.0),
+        "sparsity": iko_config.get("lambda_sparsity", 1.0),
+        "target_energy": iko_config.get("lambda_target_energy", 1.0),
+        "vertical": lambda_vertical,
+    }
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     output_dir = Path("outputs") / "iko" / timestamp
@@ -575,6 +624,12 @@ def main():
     weight_model.weight.data.zero_()
     weight_model.weight.data[0, 0] = 1.0  # omnidirectional (0th-order) SH only
     optimizer = torch.optim.Adam(weight_model.parameters(), lr=lr)
+    active_tasks = [name for name, weight in lambdas.items() if weight != 0.0]
+    cagrad = CAGrad(active_tasks, c=cagrad_c) if use_cagrad else None
+    print(f"Optimiser step: {'CAGrad (c=' + str(cagrad_c) + ', tasks=' + str(active_tasks) + ')' if use_cagrad else 'plain weighted sum'}")
+    print(f"Loss weights: {lambdas}")
+    with open(output_dir / "loss_weights.json", "w") as f:
+        json.dump(lambdas, f, indent=2)
 
     signal = torch.zeros(1, 256, device=device, dtype=dtype)
     signal[0, 0] = 1.0  # unit impulse (deterministic stimulus)
@@ -598,6 +653,9 @@ def main():
         ) = compute_directivity_loss(
             initial_weights, sh_matrix_full, listener_mask, reflector_mask, sh_matrix,
         )
+        initial_sparsity_loss, initial_target_energy_loss = compute_pattern_sparsity_loss(
+            initial_weights, sh_matrix_full, listener_mask, reflector_mask,
+        )
         initial_vertical_loss = compute_vertical_radiation_loss(initial_weights, sh_matrix_vertical)
         save_run_artifacts(
             output_dir, "initial", signal, initial_weights, initial_directional_weights,
@@ -611,6 +669,8 @@ def main():
         f"sidelobe loss: {initial_sidelobe_loss.item():.4f}, "
         f"listener dir: {initial_listener_directivity_loss.item():.4f}, "
         f"reflector dir: {initial_reflector_directivity_loss.item():.4f}, "
+        f"sparsity loss: {initial_sparsity_loss.item():.4f}, "
+        f"target energy loss: {initial_target_energy_loss.item():.4f}, "
         f"vertical loss: {initial_vertical_loss.item():.4f}, "
         f"beam gains: listener={initial_gains[0].item():.3f}, reflector={initial_gains[1].item():.3f}"
     )
@@ -635,16 +695,22 @@ def main():
         ) = compute_directivity_loss(
             weights, sh_matrix_full, listener_mask, reflector_mask, sh_matrix,
         )
-        vertical_loss = compute_vertical_radiation_loss(weights, sh_matrix_vertical)
-        total_loss = (
-            loss
-            + 0.0 * l1_loss
-            + 0.0 * sidelobe_loss
-            + 0.0 * (listener_directivity_loss + reflector_directivity_loss)
-            + lambda_vertical * vertical_loss
+        sparsity_loss, target_energy_loss = compute_pattern_sparsity_loss(
+            weights, sh_matrix_full, listener_mask, reflector_mask,
         )
-        total_loss.backward()
-        optimizer.step()
+        vertical_loss = compute_vertical_radiation_loss(weights, sh_matrix_vertical)
+        losses = {
+            "loc": loss,
+            "l1": l1_loss,
+            "sidelobe": sidelobe_loss,
+            "directivity": listener_directivity_loss + reflector_directivity_loss,
+            "sparsity": sparsity_loss,
+            "target_energy": target_energy_loss,
+            "vertical": vertical_loss,
+        }
+        weighted_losses = build_iko_weighted_loss_dict(lambdas, losses)
+        total_loss = iko_total_loss(lambdas, losses)
+        apply_iko_optim_step(optimizer, weight_model, weighted_losses, total_loss, cagrad)
         if (epoch + 1) % 10 == 0 or epoch == 0:
             with torch.no_grad():
                 azimuth, _ = evaluate_localisation(llado_model, binaural_signal, target)
@@ -664,6 +730,8 @@ def main():
                 f"sidelobe loss: {sidelobe_loss.item():.4f}, "
                 f"listener dir: {listener_directivity_loss.item():.4f}, "
                 f"reflector dir: {reflector_directivity_loss.item():.4f}, "
+                f"sparsity loss: {sparsity_loss.item():.4f}, "
+                f"target energy loss: {target_energy_loss.item():.4f}, "
                 f"vertical loss: {vertical_loss.item():.4f}, "
                 f"total loss: {total_loss.item():.4f}, azimuth: {azimuth.item():.2f}°, "
                 f"beam gains: listener={gains[0].item():.3f}, reflector={gains[1].item():.3f}, "
@@ -689,6 +757,9 @@ def main():
         ) = compute_directivity_loss(
             final_weights, sh_matrix_full, listener_mask, reflector_mask, sh_matrix,
         )
+        final_sparsity_loss, final_target_energy_loss = compute_pattern_sparsity_loss(
+            final_weights, sh_matrix_full, listener_mask, reflector_mask,
+        )
         final_vertical_loss = compute_vertical_radiation_loss(final_weights, sh_matrix_vertical)
         save_run_artifacts(
             output_dir, "final", signal, final_weights, final_directional_weights,
@@ -702,6 +773,8 @@ def main():
         f"sidelobe loss: {final_sidelobe_loss.item():.4f}, "
         f"listener dir: {final_listener_directivity_loss.item():.4f}, "
         f"reflector dir: {final_reflector_directivity_loss.item():.4f}, "
+        f"sparsity loss: {final_sparsity_loss.item():.4f}, "
+        f"target energy loss: {final_target_energy_loss.item():.4f}, "
         f"vertical loss: {final_vertical_loss.item():.4f} "
         f"(target: {target_angle}°), beam gains: listener={final_gains[0].item():.3f}, "
         f"reflector={final_gains[1].item():.3f}, "
