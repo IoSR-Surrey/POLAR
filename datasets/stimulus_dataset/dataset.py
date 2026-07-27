@@ -116,6 +116,49 @@ class BandpassWhiteNoiseDataset(Dataset):
         return torch.from_numpy(stimuli)
 
 
+class MockStimulusDataset(Dataset):
+    """Single-sample stimulus dataset for quick wiring checks (impulse or white noise)."""
+
+    def __init__(
+        self,
+        fs,
+        stimulus_length_ms=5,
+        stimulus_type="impulse",
+        seed=0,
+    ):
+        if stimulus_type not in ("impulse", "noise"):
+            raise ValueError(f"stimulus_type must be 'impulse' or 'noise', got {stimulus_type!r}.")
+
+        self.fs = fs
+        self.stimulus_length_ms = stimulus_length_ms
+        self.stimulus_type = stimulus_type
+        self.seed = seed
+        self.n_samples = int(round(stimulus_length_ms * fs / 1000))
+        if self.n_samples < 1:
+            raise ValueError(f"stimulus_length_ms ({stimulus_length_ms}) yields fewer than 1 sample at fs={fs}.")
+
+        self.stimulus = self.generate_stimulus()
+
+    def __len__(self):
+        return 1
+
+    def __getitem__(self, idx):
+        return self.stimulus[idx]
+
+    def generate_stimulus(self):
+        stim = np.zeros((1, 1, self.n_samples), dtype=np.float32)
+        if self.stimulus_type == "impulse":
+            stim[0, 0, 0] = 1.0
+        else:
+            rng = np.random.default_rng(self.seed)
+            noise = rng.standard_normal(self.n_samples).astype(np.float32)
+            rms = np.sqrt(np.mean(noise ** 2))
+            if rms > 0:
+                noise /= rms
+            stim[0, 0] = noise
+        return torch.from_numpy(stim)
+
+
 def get_stim_loader(
     fs,
     n_bands,
@@ -126,6 +169,9 @@ def get_stim_loader(
     f_min=20.0,
     f_max=20000.0,
     band_mode="erb",
+    dataset_type="bandpass",
+    stimulus_type="impulse",
+    seed=0,
     shuffle=True,
     num_workers=0,
     pin_memory=False,
@@ -135,16 +181,27 @@ def get_stim_loader(
     if sys.platform == "win32" and num_workers > 0:
         num_workers = 0
 
-    dataset = BandpassWhiteNoiseDataset(
-        fs=fs,
-        n_bands=n_bands,
-        n_samples_per_band=n_samples_per_band,
-        stimulus_length_ms=stimulus_length_ms,
-        ramp_time_ms=ramp_time_ms,
-        f_min=f_min,
-        f_max=f_max,
-        band_mode=band_mode,
-    )
+    if dataset_type == "bandpass":
+        dataset = BandpassWhiteNoiseDataset(
+            fs=fs,
+            n_bands=n_bands,
+            n_samples_per_band=n_samples_per_band,
+            stimulus_length_ms=stimulus_length_ms,
+            ramp_time_ms=ramp_time_ms,
+            f_min=f_min,
+            f_max=f_max,
+            band_mode=band_mode,
+        )
+    elif dataset_type == "mock":
+        dataset = MockStimulusDataset(
+            fs=fs,
+            stimulus_length_ms=stimulus_length_ms,
+            stimulus_type=stimulus_type,
+            seed=seed,
+        )
+    else:
+        raise ValueError(f"dataset_type must be 'bandpass' or 'mock', got {dataset_type!r}.")
+
     loader = DataLoader(
         dataset,
         batch_size=batch_size,

@@ -1,1 +1,5 @@
-from datasets.stimulus_dataset.dataset import BandpassWhiteNoiseDataset, get_stim_loader
+from datasets.stimulus_dataset.dataset import (
+    BandpassWhiteNoiseDataset,
+    MockStimulusDataset,
+    get_stim_loader,
+)
