@@ -9,7 +9,9 @@ os.chdir(ROOT)
 import pytest
 import torch
 import torch.nn.functional as F
+import torchaudio.functional as TF
 
+from datasets.stimulus_dataset.dataset import BandpassWhiteNoiseDataset
 from models.listener_based.llado2025 import grad_surgery as grad_surgery_module
 from models.listener_based.llado2025.grad_surgery import ItdIldDBranchGradNormFn
 from models.listener_based.llado2025.model import llado2025, llado2025_grad_surgery
@@ -80,6 +82,9 @@ def estimate_localisation(target_value: float, grad_surgery: bool = False) -> to
         "ild": torch.full((1, N_BANDS), target_value, dtype=template["ild"].dtype, device=template["ild"].device),
     }
     distance = itd_ild_template_distance(target, template)
+    distance["weighting_function_SPL"] = torch.full(
+        (1, N_BANDS), 1/N_BANDS, dtype=template["itd"].dtype, device=template["itd"].device
+    )
     return model._estimate_azimuth(distance)
 
 
@@ -165,6 +170,29 @@ def test_returns_corresponding_template_angle_with_template_hrirs(
 
 
 @pytest.mark.parametrize("grad_surgery", MODEL_VARIANTS)
+def test_louder_bandpass_source_dominates_localisation(grad_surgery: bool) -> None:
+    model = make_model(grad_surgery=grad_surgery)
+    noise_dataset = BandpassWhiteNoiseDataset(
+        fs=48000, n_bands=2, n_samples_per_band=1, stimulus_length_ms=200, ramp_time_ms=5
+    )
+    loud_noise = torch.from_numpy(noise_dataset._bandpass_white_noise(500, 700, seed=11)).view(1, 1, -1)
+    quiet_noise = torch.from_numpy(noise_dataset._bandpass_white_noise(3000, 4000, seed=22)).view(1, 1, -1)
+
+    loud_angle = 45.0
+    quiet_angle = -45.0
+    loud_source = TF.fftconvolve(
+        loud_noise, model.hrirs[_azimuth_index(loud_angle) : _azimuth_index(loud_angle) + 1]
+    )
+    quiet_source = TF.fftconvolve(
+        quiet_noise, model.hrirs[_azimuth_index(quiet_angle) : _azimuth_index(quiet_angle) + 1]
+    )
+
+    estimated = model(loud_source + quiet_source*10**(-40/20), None)["output"]
+
+    assert estimated.item() == pytest.approx(loud_angle, abs=5.0)
+
+
+@pytest.mark.parametrize("grad_surgery", MODEL_VARIANTS)
 def test_template_has_expected_structure(grad_surgery: bool) -> None:
     model = make_model(grad_surgery=grad_surgery)
     template = model.template
@@ -201,6 +229,7 @@ def test_forward_returns_expected_kwargs(grad_surgery: bool) -> None:
         "itd_distance",
         "ild_distance",
         "distance_combined",
+        "weighting_function_SPL",
     }
 
 

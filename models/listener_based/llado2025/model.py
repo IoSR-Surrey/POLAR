@@ -5,7 +5,7 @@ import torchaudio.functional as TF
 
 from utils.peripheral_processing import estimate_interaural_cues, rectify_signals, compute_iacc, compute_itd, compute_ild
 from utils.itd_ild_distance import itd_ild_template_distance
-from models.listener_based.common import create_interaural_template, estimate_azimuth_from_distance
+from models.listener_based.common import create_interaural_template, compute_loudness_weights, estimate_azimuth_from_distance
 
 
 class llado2025(nn.Module):
@@ -33,6 +33,7 @@ class llado2025(nn.Module):
         interauralcues = estimate_interaural_cues(binaural_signals, self.gtfb, self.lag_values, self.tau_iacc)
 
         itd_ild_distance = itd_ild_template_distance(interauralcues, self.template)
+        itd_ild_distance['weighting_function_SPL'] = compute_loudness_weights(interauralcues)
 
         estimated_azimuth = self._estimate_azimuth(itd_ild_distance)
 
@@ -80,6 +81,7 @@ class llado2025_grad_surgery(nn.Module):
         interauralcues = self._estimate_interaural_cues(binaural_signals)
 
         itd_ild_distance = itd_ild_template_distance(interauralcues, self.template)
+        itd_ild_distance['weighting_function_SPL'] = compute_loudness_weights(interauralcues)
 
         estimated_azimuth = self._estimate_azimuth(itd_ild_distance)
 
@@ -126,7 +128,3 @@ class llado2025_grad_surgery(nn.Module):
                 "rectified_signals_grad_itd": ItdIldDBranchGradNormFn.last_itd_grad,
                 "rectified_signals_grad_ild": ItdIldDBranchGradNormFn.last_ild_grad,
                 "iacc": iacc}
-
-
-
-
