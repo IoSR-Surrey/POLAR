@@ -568,9 +568,9 @@ def main():
         "loc": iko_config.get("lambda_loc", 1.0),
         "l1": iko_config.get("lambda_l1", 0.0),
         "sidelobe": iko_config.get("lambda_sidelobe", 0.0),
-        "directivity": iko_config.get("lambda_directivity", 1.0),
+        "directivity": iko_config.get("lambda_directivity", 0.0),
         "sparsity": iko_config.get("lambda_sparsity", 1.0),
-        "target_energy": iko_config.get("lambda_target_energy", 1.0),
+        "target_energy": iko_config.get("lambda_target_energy", 0.0),
         "vertical": lambda_vertical,
     }
 
