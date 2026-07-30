@@ -55,8 +55,13 @@ class ModelTrainer:
 
         self.loss_dict = {}
         total_loss = 0
+        
         for model_name, model in self.model_dict.items():
-            self.loss_dict[model_name] = model['criterion'](self.estimates[model_name], targets[model_name]) * model['weight']
+            
+            estimates = self.estimates[model_name]
+            target = targets[model_name].expand_as(estimates)
+            
+            self.loss_dict[model_name] = model['criterion'](estimates, target) * model['weight']
             total_loss += self.loss_dict[model_name]
         self.loss_dict['total'] = total_loss
         return self.loss_dict
