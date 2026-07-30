@@ -55,6 +55,7 @@ class MultiSourceFIR(nn.Module):
         - If init_weight is a Tensor: copy it into each branch's weights.
         - If init_weight == "middle": set the weight to an impulse at the middle index.
         - If init_weight == "split_cues": bands over [0, fs/2] or [f_min, fs/2] assigned round-robin to sources.
+        - If init_weight == "middle_opp": set weights to an positive and negative impulse at the middle index round-robin to sources.
           band_mode "linear" (default) or "log" (geomspace, matching stimulus_dataset log bands).
         """
         with torch.no_grad():
@@ -84,6 +85,10 @@ class MultiSourceFIR(nn.Module):
                     if i == 0:
                         middle_idx = weight.shape[0] // 2
                         weight[middle_idx, 0] = 1.0
+                elif isinstance(init_weight, str) and init_weight.lower() == "middle_opp":
+                    weight.zero_()
+                    middle_idx = weight.shape[0] // 2
+                    weight[middle_idx, 0] = (-1.0)**i
                 else:
                     weight.copy_(init_weight.reshape_as(weight))
 

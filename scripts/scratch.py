@@ -70,16 +70,18 @@ prop = BinauralFreeFieldPropagation(48000, lstn_pos, spk_pos, sofaile)
 n_sources = len(spk_pos)
 n_taps = 1024
 nn = MultiSourceFIR(n_taps, n_sources)
-nn.set_filter_initialisation("split_cues", fs=48000, n_bands=8, band_mode="log")
+filter_initialisation = {"init_weight": "middle_opp", "fs": 48000, "n_bands": 8, "band_mode": "log"}
+nn.set_filter_initialisation(**filter_initialisation)
 second_moment = SecondMoment(n_taps, n_sources)
 
 modelTrainer = ModelTrainer(
-    [llado_model],
-    weights=[1.0],
+    [llado_model, second_moment],
+    weights=[1.0, 1.0],
 )
 
 targets = {
     "llado2025_grad_surgery": target_angles.unsqueeze(0),
+    "SecondMoment": torch.zeros(1, n_sources),
 }
 
 stim_loader, stim_dataset = get_stim_loader(
@@ -92,6 +94,9 @@ stim_loader, stim_dataset = get_stim_loader(
     f_min=config["stimulus_dataset"]["f_min"],
     f_max=config["stimulus_dataset"]["f_max"],
     band_mode=config["stimulus_dataset"]["band_mode"],
+    dataset_type=config["stimulus_dataset"]["dataset_type"],
+    stimulus_type=config["stimulus_dataset"]["stimulus_type"],
+    seed=config["env"]["seed"],
     shuffle=config["training"]["shuffle"],
     num_workers=config["training"]["num_workers"],
     pin_memory=config["training"]["pin_memory"],
@@ -115,6 +120,8 @@ saving_manager.save("lstn_pos", lstn_pos)
 saving_manager.save("spk_pos", spk_pos)
 saving_manager.save("sofaile", sofaile)
 saving_manager.save("target_cues", target_cues)
+saving_manager.save("stimulus_dataset", config["stimulus_dataset"])
+saving_manager.save("filter_initialisation", filter_initialisation)
 
 
 dummy_input = torch.ones(1,1)
