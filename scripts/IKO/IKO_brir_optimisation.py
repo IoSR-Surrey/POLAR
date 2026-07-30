@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib import cm, colors
 import numpy as np
 import torch
 import torch.nn as nn
@@ -18,10 +19,17 @@ os.chdir(ROOT)
 from propagation.helpers import _calculate_source_angle_2D
 from utils.IKO_functions import compute_real_sh_matrix, num_hoa_channels
 from utils.miscellaneous import load_npy_to_torch
-from utils.sofa_functions import load_sofa, get_template_for_llado2025_desena_2020
+from utils.sofa_functions import load_sofa, resample_sofa_ir, get_template_for_llado2025_desena_2020
+from logger.saving import extract_loss_grad_and_norms, task_grad_pairwise_cosine_similarity_stats
 from models.cagrad import CAGrad
 from models.listener_based.llado2025.model import llado2025_grad_surgery
 from plotting.scatter_plots import _add_critical_band_colorbar, _compute_target_itd_ild, _scatter_itd_ild_from_arrays
+from plotting.XY_plots import (
+    loss_over_epochs_plot,
+    loss_grad_norms_over_epochs_plot,
+    raw_grad_cosine_to_reference_plot,
+    task_grad_pairwise_cosine_similarity_plot,
+)
 
 
 # Optional extra rotation for beam-pattern polar plots only (does not affect SH evaluation).
@@ -30,6 +38,7 @@ _BEAM_PATTERN_PLOT_ROTATION_RAD = 0.0
 # ACN3+ beams to IKO back, ACN1+ to IKO right). Evaluate Y at physical_az + offset so plots
 # and SH losses match the physical IKO frame (az 0 = look / front).
 _PHYSICAL_AZ_TO_MATH_SH_OFFSET_RAD = np.pi
+_BEAM_PATTERN_DB_FLOOR = -40.0
 N_IKO_LOUDSPEAKERS = 20
 IKO_DATA_DIR = Path("data/IKO")
 SPH_TO_DRIVER_NPY = IKO_DATA_DIR / "hoa_to_driver" / "hoa_to_driver.npy"
@@ -55,18 +64,54 @@ def iko_total_loss(lambdas, losses):
     return total
 
 
+def get_active_harmonic_indices(order, use_2d_harmonics, device):
+    """Return full HOA indices, or only sectoral harmonics (|m| = n) for 2D playback."""
+    indices = []
+    idx = 0
+    for n in range(order + 1):
+        for m in range(-n, n + 1):
+            if not use_2d_harmonics or abs(m) == n:
+                indices.append(idx)
+            idx += 1
+    return torch.tensor(indices, device=device, dtype=torch.long)
+
+
+def expand_active_harmonic_weights(weight_model, active_indices, n_channels, device, dtype):
+    """Expand optimised active coefficients into a full HOA vector with inactive channels at zero."""
+    active_weights = weight_model(torch.ones(1, 1, device=device, dtype=dtype)).reshape(-1)
+    return torch.zeros(n_channels, device=device, dtype=dtype).scatter(0, active_indices, active_weights)
+
+
 def apply_iko_optim_step(optimizer, weight_model, weighted_losses, total_loss, cagrad=None):
-    """Update weights via CAGrad (if given) or plain summed-loss backward."""
+    """Update weights via CAGrad (if given) or plain summed-loss backward.
+
+    Returns dict with per-task raw_grads (and effective_grad when using CAGrad).
+    """
     if cagrad is not None:
-        cagrad.step(weighted_losses, list(weight_model.parameters()), optimizer)
-    else:
-        total_loss.backward()
-        optimizer.step()
+        return cagrad.step(weighted_losses, list(weight_model.parameters()), optimizer)
+    raw_grads, _ = extract_loss_grad_and_norms(weighted_losses, weight_model)
+    total_loss.backward()
+    optimizer.step()
+    return {"raw_grads": raw_grads}
 
 
 def _beam_pattern_plot_azimuths(azimuths):
     """Rotate IKO-frame azimuth angles for beam-pattern polar display only."""
     return (np.asarray(azimuths, dtype=float) + _BEAM_PATTERN_PLOT_ROTATION_RAD) % (2 * np.pi)
+
+
+def _beam_pattern_db(magnitude, reference):
+    """Convert beam-pattern magnitude to dB with a fixed display floor."""
+    magnitude = np.asarray(magnitude, dtype=float)
+    return np.maximum(20.0 * np.log10(np.maximum(magnitude, 1e-12) / max(float(reference), 1e-12)), _BEAM_PATTERN_DB_FLOOR)
+
+
+def _format_db_polar_axis(ax):
+    """Format offset non-negative polar radii as dB labels."""
+    tick_db = np.arange(_BEAM_PATTERN_DB_FLOOR, 0.1, 10.0)
+    ax.set_ylim(0.0, -_BEAM_PATTERN_DB_FLOOR)
+    ax.set_yticks(tick_db - _BEAM_PATTERN_DB_FLOOR)
+    ax.set_yticklabels([f"{value:.0f} dB" for value in tick_db])
 
 
 def load_iko_brirs(brir_path, n_speakers, device, dtype):
@@ -405,6 +450,20 @@ def beam_pattern_over_circle(order, weights, num_points=360):
     return azimuths, Y @ w
 
 
+def beam_pattern_over_sphere(order, weights, num_azimuths=180, num_elevations=91):
+    """Full 3D beam pattern in the physical IKO frame (az 0 = look / front)."""
+    azimuths = np.linspace(0.0, 2.0 * np.pi, num_azimuths, endpoint=False)
+    elevations = np.linspace(-np.pi / 2.0, np.pi / 2.0, num_elevations)
+    azimuth_grid, elevation_grid = np.meshgrid(azimuths, elevations)
+    Y = compute_real_sh_matrix(
+        order,
+        physical_azimuths_to_math_sh(azimuth_grid.ravel()),
+        elevation_grid.ravel(),
+    )
+    w = weights.detach().cpu().numpy().reshape(-1)
+    return azimuth_grid, elevation_grid, (Y @ w).reshape(azimuth_grid.shape)
+
+
 def sh_weights_to_nm(order, weights):
     """Map flat HOA weight vector to (n, m, value) using the same ordering as compute_real_sh_matrix."""
     w = weights.detach().cpu().numpy().reshape(-1)
@@ -488,12 +547,7 @@ def plot_weight_decomposition(order, initial_weights, final_weights, plots_dir):
 
 
 def plot_beam_pattern_overlay(order, weights, listener_az, reflector_az, plots_dir, stage="final", num_points=360):
-    """Save polar subplots (one per harmonic order) with weighted SH patterns overlaid.
-
-    Uses |w·Y| as the radial coordinate so dipoles (order n=1, |m|=1) appear as
-    two-lobed figure-of-eight patterns. Signed SH values cannot be plotted directly
-    as polar radius because negative r is folded to the opposite angle in matplotlib.
-    """
+    """Save polar dB subplots (one per harmonic order) with weighted SH patterns overlaid."""
     azimuths = np.linspace(0.0, 2.0 * np.pi, num_points, endpoint=False)
     plot_azimuths = _beam_pattern_plot_azimuths(azimuths)
     elevations = np.zeros(num_points)
@@ -503,31 +557,154 @@ def plot_beam_pattern_overlay(order, weights, listener_az, reflector_az, plots_d
     axes = axes.ravel()
     for ax in axes[order + 1:]:
         ax.set_visible(False)
-    r_lim = 0.1
     plot_listener_az = float(_beam_pattern_plot_azimuths(listener_az))
     plot_reflector_az = float(_beam_pattern_plot_azimuths(reflector_az))
 
     for n, ax in enumerate(axes):
         order_sum = np.zeros(num_points, dtype=np.float64)
+        weighted_patterns = []
         for idx, (harmonic_n, m, w) in enumerate(sh_weights_to_nm(order, weights)):
             if harmonic_n != n:
                 continue
             weighted_pattern = sh_matrix[:, idx] * w
             order_sum += weighted_pattern
-            ax.plot(plot_azimuths, np.abs(weighted_pattern), label=f"m={m:+d}")
-            r_lim = max(r_lim, float(np.max(np.abs(weighted_pattern))) * 1.1)
+            weighted_patterns.append((m, np.abs(weighted_pattern)))
+        reference = max(
+            [float(np.max(pattern)) for _, pattern in weighted_patterns]
+            + [float(np.max(np.abs(order_sum))), 1e-12]
+        )
+        for m, magnitude in weighted_patterns:
+            ax.plot(plot_azimuths, _beam_pattern_db(magnitude, reference) - _BEAM_PATTERN_DB_FLOOR, label=f"m={m:+d}")
 
-        ax.plot(plot_azimuths, np.abs(order_sum), color="black", linewidth=2.0, label="Σ order")
-        r_lim = max(r_lim, float(np.max(np.abs(order_sum))) * 1.1)
-        ax.plot([plot_listener_az, plot_listener_az], [0, r_lim], color="blue", linestyle="--", linewidth=1.5, label="Listener")
-        ax.plot([plot_reflector_az, plot_reflector_az], [0, r_lim], color="gray", linestyle="--", linewidth=1.5, label="Reflector")
+        ax.plot(
+            plot_azimuths,
+            _beam_pattern_db(np.abs(order_sum), reference) - _BEAM_PATTERN_DB_FLOOR,
+            color="black", linewidth=2.0, label="Σ order",
+        )
+        ax.plot([plot_listener_az, plot_listener_az], [0, -_BEAM_PATTERN_DB_FLOOR], color="blue", linestyle="--", linewidth=1.5, label="Listener")
+        ax.plot([plot_reflector_az, plot_reflector_az], [0, -_BEAM_PATTERN_DB_FLOOR], color="gray", linestyle="--", linewidth=1.5, label="Reflector")
+        _format_db_polar_axis(ax)
         ax.set_title(f"Order n={n} ({stage})")
         ax.legend(loc="upper right", fontsize=7)
 
-    fig.suptitle(f"Weighted SH magnitude patterns by order ({stage})", y=1.02)
+    fig.suptitle(f"Weighted SH patterns by order in dB ({stage})", y=1.02)
     fig.tight_layout()
     fig.savefig(plots_dir / f"beam_pattern_overlay_{stage}.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def plot_beam_pattern_3d(order, initial_weights, final_weights, listener_az, reflector_az, plots_dir):
+    """Save initial and optimised 3D beam-pattern surfaces from several viewpoints."""
+    patterns = []
+    for weights in [initial_weights, final_weights]:
+        azimuths, elevations, pattern = beam_pattern_over_sphere(order, weights)
+        patterns.append((azimuths, elevations, np.abs(pattern)))
+
+    reference = max(max(float(np.max(pattern)) for _, _, pattern in patterns), 1e-12)
+    patterns = [
+        (azimuths, elevations, _beam_pattern_db(magnitude, reference))
+        for azimuths, elevations, magnitude in patterns
+    ]
+    radial_limit = -_BEAM_PATTERN_DB_FLOOR
+    norm = colors.Normalize(vmin=_BEAM_PATTERN_DB_FLOOR, vmax=0.0)
+    view_azimuths = [-60, 60, 180]
+    fig = plt.figure(figsize=(18, 11), constrained_layout=True)
+    axes = [
+        [fig.add_subplot(2, len(view_azimuths), row * len(view_azimuths) + column + 1, projection="3d")
+         for column in range(len(view_azimuths))]
+        for row in range(2)
+    ]
+    plot_listener_az = float(_beam_pattern_plot_azimuths(listener_az))
+    plot_reflector_az = float(_beam_pattern_plot_azimuths(reflector_az))
+
+    for row, ((azimuths, elevations, pattern_db), label) in enumerate(zip(patterns, ["Initial", "Optimised"])):
+        plot_azimuths = _beam_pattern_plot_azimuths(azimuths)
+        radius = pattern_db - _BEAM_PATTERN_DB_FLOOR
+        x = radius * np.cos(elevations) * np.cos(plot_azimuths)
+        y = radius * np.cos(elevations) * np.sin(plot_azimuths)
+        z = radius * np.sin(elevations)
+        for ax, view_azimuth in zip(axes[row], view_azimuths):
+            ax.plot_surface(
+                x, y, z, facecolors=cm.viridis(norm(pattern_db)),
+                linewidth=0, antialiased=True, shade=False,
+            )
+            ax.plot(
+                [0, radial_limit * np.cos(plot_listener_az)],
+                [0, radial_limit * np.sin(plot_listener_az)],
+                [0, 0], color="blue", linestyle="--", label="Listener",
+            )
+            ax.plot(
+                [0, radial_limit * np.cos(plot_reflector_az)],
+                [0, radial_limit * np.sin(plot_reflector_az)],
+                [0, 0], color="gray", linestyle="--", label="Reflector",
+            )
+            ax.set(xlim=(-radial_limit, radial_limit), ylim=(-radial_limit, radial_limit), zlim=(-radial_limit, radial_limit))
+            ax.set_box_aspect((1, 1, 1))
+            ax.set_xlabel("x (azimuth 0°)")
+            ax.set_ylabel("y (azimuth +90°)")
+            ax.set_zlabel("z")
+            ax.set_title(f"{label} dB — view azimuth {view_azimuth}°")
+            ax.view_init(elev=25, azim=view_azimuth)
+            ax.legend(loc="upper right", fontsize=8)
+
+    fig.colorbar(
+        cm.ScalarMappable(norm=norm, cmap="viridis"),
+        ax=[ax for row_axes in axes for ax in row_axes], shrink=0.7, pad=0.04, label="Level relative to shared peak (dB)",
+    )
+    fig.savefig(plots_dir / "beam_pattern_3d.png", dpi=150)
+    plt.close(fig)
+
+
+def _cpu_grad_dict(raw_grads):
+    """Detach per-task gradients to CPU for epoch history storage."""
+    return {
+        name: (grad.detach().cpu() if grad is not None else None)
+        for name, grad in raw_grads.items()
+    }
+
+
+def plot_task_grad_diagnostics(plots_dir, raw_grads_history, effective_grad_history=None):
+    """Save per-task gradient norm and cosine-similarity diagnostic plots."""
+    if not raw_grads_history:
+        return
+    plots_dir = Path(plots_dir)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    task_names = list(raw_grads_history[0].keys())
+
+    raw_grad_norms = [
+        {key: torch.norm(epoch_grads[key]) for key in epoch_grads}
+        for epoch_grads in raw_grads_history
+    ]
+    loss_grad_norms_over_epochs_plot(raw_grad_norms, "Per-task raw gradient norm", norm_kind="Raw")
+    plt.savefig(plots_dir / "raw_grad_norms.png", dpi=150)
+    plt.close()
+
+    summed_raw_grad = [
+        torch.stack([epoch_grads[key] for key in epoch_grads]).sum(dim=0)
+        for epoch_grads in raw_grads_history
+    ]
+    raw_grad_cosine_to_reference_plot(
+        raw_grads_history, summed_raw_grad, task_names,
+        "Task gradient vs plain (summed) direction",
+    )
+    plt.savefig(plots_dir / "raw_vs_plain_cosine_similarity.png", dpi=150)
+    plt.close()
+
+    if effective_grad_history is not None:
+        raw_grad_cosine_to_reference_plot(
+            raw_grads_history, effective_grad_history, task_names,
+            "Task gradient vs CAGrad update direction",
+        )
+        plt.savefig(plots_dir / "raw_vs_cagrad_cosine_similarity.png", dpi=150)
+        plt.close()
+
+    task_grad_pairwise_cosine_similarity_plot(
+        **task_grad_pairwise_cosine_similarity_stats(raw_grads_history),
+        title="Task Gradients on HOA Weights",
+        pairwise_only=True,
+    )
+    plt.savefig(plots_dir / "task_grad_pairwise_cosine_similarity.png", dpi=150)
+    plt.close()
 
 
 def plot_results(output_dir, order, initial_weights, final_weights, geometry, initial_azimuth, final_azimuth, target_angle, initial_binaural, final_binaural, llado_model, sofaile, gtfb):
@@ -539,19 +716,20 @@ def plot_results(output_dir, order, initial_weights, final_weights, geometry, in
     reflector_az = float(geometry["sh_azimuths_rad"][1])
 
     plot_beam_pattern_overlay(order, final_weights, listener_az, reflector_az, plots_dir, stage="final")
+    plot_beam_pattern_3d(order, initial_weights, final_weights, listener_az, reflector_az, plots_dir)
 
+    beam_patterns = [beam_pattern_over_circle(order, weights) for weights in [initial_weights, final_weights]]
+    reference = max(max(float(np.max(np.abs(pattern))) for _, pattern in beam_patterns), 1e-12)
     fig, axes = plt.subplots(1, 2, subplot_kw={"projection": "polar"}, figsize=(12, 5))
     plot_listener_az = float(_beam_pattern_plot_azimuths(listener_az))
     plot_reflector_az = float(_beam_pattern_plot_azimuths(reflector_az))
-    for ax, weights, label in zip(axes, [initial_weights, final_weights], ["Initial", "Optimised"]):
-        azimuths, pattern = beam_pattern_over_circle(order, weights)
+    for ax, (azimuths, pattern), label in zip(axes, beam_patterns, ["Initial", "Optimised"]):
         plot_azimuths = _beam_pattern_plot_azimuths(azimuths)
-        # Use |w·Y| as radius: signed values fold to the opposite angle in polar coords.
-        ax.plot(plot_azimuths, np.abs(pattern), label="Pattern")
-        r_lim = max(float(np.max(np.abs(pattern))), 0.1) * 1.1
-        ax.plot([plot_listener_az, plot_listener_az], [0, r_lim], color="blue", linestyle="--", linewidth=1.5, label="Listener")
-        ax.plot([plot_reflector_az, plot_reflector_az], [0, r_lim], color="gray", linestyle="--", linewidth=1.5, label="Reflector")
-        ax.set_title(f"{label} beam pattern")
+        ax.plot(plot_azimuths, _beam_pattern_db(np.abs(pattern), reference) - _BEAM_PATTERN_DB_FLOOR, label="Pattern")
+        ax.plot([plot_listener_az, plot_listener_az], [0, -_BEAM_PATTERN_DB_FLOOR], color="blue", linestyle="--", linewidth=1.5, label="Listener")
+        ax.plot([plot_reflector_az, plot_reflector_az], [0, -_BEAM_PATTERN_DB_FLOOR], color="gray", linestyle="--", linewidth=1.5, label="Reflector")
+        _format_db_polar_axis(ax)
+        ax.set_title(f"{label} beam pattern (dB)")
         ax.legend(loc="upper right", fontsize=8)
     fig.tight_layout()
     fig.savefig(plots_dir / "beam_pattern.png", dpi=150)
@@ -614,6 +792,7 @@ def main():
     vertical_elevation_deg = iko_config.get("vertical_elevation_deg", [30.0, 60.0, 90.0])
     vertical_num_azimuths = iko_config.get("vertical_num_azimuths", pattern_num_points)
     use_cagrad = iko_config.get("use_cagrad", False)
+    use_2d_harmonics = iko_config.get("use_2d_harmonics", False)
     cagrad_c = float(config["training"].get("cagrad_c", 0.5))
     lambdas = {
         "loc": lambda_loc,
@@ -629,13 +808,14 @@ def main():
     output_dir = Path("outputs") / "iko_brir" / timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    sofaile = load_sofa("data/SOFA/SYMMETRIC_D1_48K_24bit_256tap_FIR_SOFA.sofa")
+    sofaile = resample_sofa_ir(load_sofa("data/SOFA/mit_kemar_large_pinna.sofa"), fs)
     hrirs = get_template_for_llado2025_desena_2020(sofaile, device=device, dtype=dtype)
     gtfb = load_npy_to_torch("data/banks/gtfb_48k.npy", device=device, dtype=dtype)
 
     d = 2.0
     iko_order = 3
     n_eigenbeams = num_hoa_channels(iko_order)
+    active_harmonic_indices = get_active_harmonic_indices(iko_order, use_2d_harmonics, device)
     listener_positions = torch.tensor([[0.0, 0.0]], dtype=dtype)
 
     brirs = load_iko_brirs(BRIR_NPY, N_IKO_LOUDSPEAKERS, device, dtype)
@@ -673,23 +853,26 @@ def main():
     llado_model = llado2025_grad_surgery(fs, hrirs, gtfb, device=device, dtype=dtype)
     llado_model.eval()
 
-    weight_model = nn.Linear(1, n_eigenbeams, bias=False, device=device, dtype=dtype)
+    weight_model = nn.Linear(1, len(active_harmonic_indices), bias=False, device=device, dtype=dtype)
     weight_model.weight.data.zero_()
     weight_model.weight.data[0, 0] = 1.0  # omnidirectional (0th-order) SH only
     optimizer = torch.optim.Adam(weight_model.parameters(), lr=lr)
     active_tasks = [name for name, weight in lambdas.items() if weight != 0.0]
     cagrad = CAGrad(active_tasks, c=cagrad_c) if use_cagrad else None
     print(f"Optimiser step: {'CAGrad (c=' + str(cagrad_c) + ', tasks=' + str(active_tasks) + ')' if use_cagrad else 'plain weighted sum'}")
+    print(f"HOA components: {'2D sectoral only (|m| = n)' if use_2d_harmonics else 'full 3D'}")
     print(f"Loss weights: {lambdas}")
-    with open(output_dir / "loss_weights.json", "w") as f:
-        json.dump(lambdas, f, indent=2)
+    with open(output_dir / "optim_config.json", "w") as f:
+        json.dump({"use_cagrad": use_cagrad, "use_2d_harmonics": use_2d_harmonics, "cagrad_c": cagrad_c, "loss_weights": lambdas}, f, indent=2)
 
     signal = torch.zeros(1, 256, device=device, dtype=dtype)
     signal[0, 0] = 1.0  # unit impulse (deterministic stimulus)
     target = torch.tensor(target_angle, device=device, dtype=dtype)
 
     with torch.no_grad():
-        initial_weights = weight_model(torch.ones(1, 1, device=device, dtype=dtype)).reshape(-1)
+        initial_weights = expand_active_harmonic_weights(
+            weight_model, active_harmonic_indices, n_eigenbeams, device, dtype,
+        )
         initial_binaural, initial_speaker_ir = render_binaural_brir(
             signal, initial_weights, eigenbeam_to_loudspeaker, brirs,
         )
@@ -724,9 +907,14 @@ def main():
         f"beam gains: listener={initial_gains[0].item():.3f}, reflector={initial_gains[1].item():.3f}"
     )
 
+    raw_grads_history = []
+    effective_grad_history = [] if use_cagrad else None
+    loss_history = []
     for epoch in range(n_epochs):
         optimizer.zero_grad()
-        weights = weight_model(torch.ones(1, 1, device=device, dtype=dtype)).reshape(-1)
+        weights = expand_active_harmonic_weights(
+            weight_model, active_harmonic_indices, n_eigenbeams, device, dtype,
+        )
         binaural_signal, _ = render_binaural_brir(
             signal, weights, eigenbeam_to_loudspeaker, brirs,
         )
@@ -758,7 +946,14 @@ def main():
         }
         weighted_losses = build_iko_weighted_loss_dict(lambdas, losses)
         total_loss = iko_total_loss(lambdas, losses)
-        apply_iko_optim_step(optimizer, weight_model, weighted_losses, total_loss, cagrad)
+        loss_history.append({
+            **{name: value.detach().cpu() for name, value in losses.items()},
+            "total": total_loss.detach().cpu(),
+        })
+        step_info = apply_iko_optim_step(optimizer, weight_model, weighted_losses, total_loss, cagrad)
+        raw_grads_history.append(_cpu_grad_dict(step_info["raw_grads"]))
+        if effective_grad_history is not None:
+            effective_grad_history.append(step_info["effective_grad"].detach().cpu())
         if (epoch + 1) % 10 == 0 or epoch == 0:
             with torch.no_grad():
                 azimuth, _ = evaluate_localisation(llado_model, binaural_signal, target)
@@ -788,7 +983,9 @@ def main():
             )
 
     with torch.no_grad():
-        final_weights = weight_model(torch.ones(1, 1, device=device, dtype=dtype)).reshape(-1)
+        final_weights = expand_active_harmonic_weights(
+            weight_model, active_harmonic_indices, n_eigenbeams, device, dtype,
+        )
         final_binaural, final_speaker_ir = render_binaural_brir(
             signal, final_weights, eigenbeam_to_loudspeaker, brirs,
         )
@@ -831,6 +1028,10 @@ def main():
         initial_azimuth.item(), final_azimuth.item(), target_angle,
         initial_binaural, final_binaural, llado_model, sofaile, gtfb,
     )
+    loss_over_epochs_plot(loss_history, "IKO BRIR losses over epochs")
+    plt.savefig(output_dir / "plots" / "loss_over_epochs.png", dpi=150)
+    plt.close()
+    plot_task_grad_diagnostics(output_dir / "plots", raw_grads_history, effective_grad_history)
     save_hoa_pink_noise_wav(
         output_dir, final_weights, fs, order=iko_order, stage="final", seed=config["env"].get("seed", 0),
     )

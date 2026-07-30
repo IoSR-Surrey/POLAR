@@ -1,4 +1,5 @@
 import torch
+import torchaudio.functional as TF
 import numpy as np
 import sofar as sf
 
@@ -26,6 +27,22 @@ def get_IRs(idx, sofaile, device='cpu', dtype=torch.float32):
 
 def load_sofa(sofa_file_path):
     return sf.read_sofa(sofa_file_path, verbose=False)
+
+def resample_sofa_ir(sofaile, target_fs):
+    """Resample a SOFA object's HRIRs in place to target_fs."""
+    source_fs = float(np.asarray(sofaile.Data_SamplingRate).reshape(-1)[0])
+    if source_fs == target_fs:
+        return sofaile
+
+    ir_dtype = sofaile.Data_IR.dtype
+    sofaile.Data_IR = TF.resample(
+        torch.from_numpy(sofaile.Data_IR),
+        source_fs,
+        target_fs,
+    ).numpy().astype(ir_dtype, copy=False)
+    sofaile.Data_SamplingRate = np.asarray(target_fs, dtype=np.asarray(sofaile.Data_SamplingRate).dtype)
+    return sofaile
+
 
 def get_template_for_llado2025_desena_2020(sofaile, device='cpu', dtype=torch.float32):
     angles = torch.arange(-90, 95, 5, device=device, dtype=dtype).view(-1,1)

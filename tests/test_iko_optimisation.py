@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 
 from utils.IKO_functions import compute_real_sh_matrix, num_hoa_channels
-from utils.sofa_functions import load_sofa
+from utils.sofa_functions import load_sofa, resample_sofa_ir
 
 
 def load_iko_optimisation_module():
@@ -34,7 +34,7 @@ DTYPE = torch.float32
 
 @pytest.fixture
 def sofaile():
-    return load_sofa("data/SOFA/SYMMETRIC_D1_48K_24bit_256tap_FIR_SOFA.sofa")
+    return resample_sofa_ir(load_sofa("data/SOFA/mit_kemar_large_pinna.sofa"), FS)
 
 
 @pytest.fixture
@@ -204,7 +204,8 @@ def test_get_binaural_hrir_shape(sofaile, listener_positions, geometry) -> None:
     )
     assert hrir.shape[0] == 1
     assert hrir.shape[1] == 2
-    assert hrir.shape[2] == 256
+    assert hrir.shape[2] == sofaile.Data_IR.shape[2]
+    assert float(sofaile.Data_SamplingRate) == FS
 
 
 def test_beam_pattern_over_circle_is_flat_for_omni_weights() -> None:

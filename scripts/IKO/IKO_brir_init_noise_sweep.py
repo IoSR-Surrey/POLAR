@@ -22,7 +22,7 @@ os.chdir(ROOT)
 
 from utils.IKO_functions import num_hoa_channels
 from utils.miscellaneous import load_npy_to_torch
-from utils.sofa_functions import load_sofa, get_template_for_llado2025_desena_2020
+from utils.sofa_functions import load_sofa, resample_sofa_ir, get_template_for_llado2025_desena_2020
 from models.listener_based.llado2025.model import llado2025_grad_surgery
 
 
@@ -87,7 +87,7 @@ def main():
     iko_order = 3
     n_eigenbeams = num_hoa_channels(iko_order)
 
-    sofaile = load_sofa("data/SOFA/SYMMETRIC_D1_48K_24bit_256tap_FIR_SOFA.sofa")
+    sofaile = resample_sofa_ir(load_sofa("data/SOFA/mit_kemar_large_pinna.sofa"), fs)
     hrirs = get_template_for_llado2025_desena_2020(sofaile, device=device, dtype=dtype)
     gtfb = load_npy_to_torch("data/banks/gtfb_48k.npy", device=device, dtype=dtype)
     llado_model = llado2025_grad_surgery(fs, hrirs, gtfb, device=device, dtype=dtype)
