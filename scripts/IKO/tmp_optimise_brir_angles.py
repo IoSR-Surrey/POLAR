@@ -12,13 +12,14 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
-ANGLES = [-30, -20, -10, 0, 10, 20, 30]
+from utils.seed import set_seed
+
+ANGLES = [0, -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15, -16, -17, -18, -19, -20]
 HYPERPARAMETERS_PATH = ROOT / "config" / "hyperpameters.json"
 OUTPUTS_ROOT = ROOT / "outputs" / "iko_brir"
 MANIFEST_PATH = OUTPUTS_ROOT / "angle_sweep_manifest.json"
 DURATION_S = 2.0
 RAMP_S = 0.05
-NOISE_SEED = 0
 TARGET_PEAK = 0.95
 STAGE = "final"
 
@@ -63,6 +64,7 @@ def rename_run_dir(run_dir, angle):
 
 def main():
     config = load_config()
+    set_seed(config["env"]["seed"])
     original_target_angle = config["training"]["target_angle"]
     fs = int(config["env"]["fs"])
     device = config["env"]["device"]
@@ -72,7 +74,7 @@ def main():
     eigenbeam_to_loudspeaker = iko_brir.load_sph_to_driver(
         iko_brir.SPH_TO_DRIVER_NPY, n_eigenbeams, iko_brir.N_IKO_LOUDSPEAKERS, device, dtype,
     )
-    mono = export_iko.white_noise(int(round(DURATION_S * fs)), random_state=NOISE_SEED)
+    mono = export_iko.white_noise(int(round(DURATION_S * fs)), random_state=config["env"]["seed"])
     mono = export_iko.apply_ramp(mono, fs, RAMP_S)
 
     manifest = {}

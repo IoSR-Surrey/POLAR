@@ -19,6 +19,7 @@ os.chdir(ROOT)
 from propagation.helpers import _calculate_source_angle_2D
 from utils.IKO_functions import compute_real_sh_matrix, num_hoa_channels
 from utils.miscellaneous import load_npy_to_torch
+from utils.seed import set_seed
 from utils.sofa_functions import load_sofa, resample_sofa_ir, get_template_for_llado2025_desena_2020
 from logger.saving import extract_loss_grad_and_norms, task_grad_pairwise_cosine_similarity_stats
 from models.cagrad import CAGrad
@@ -772,6 +773,7 @@ def plot_results(output_dir, order, initial_weights, final_weights, geometry, in
 def main():
     with open("config/hyperpameters.json", "r") as f:
         config = json.load(f)
+    set_seed(config["env"]["seed"])
 
     fs = config["env"]["fs"]
     device = config["env"]["device"]

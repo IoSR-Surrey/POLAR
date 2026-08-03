@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 
 from utils.sofa_functions import load_sofa, get_template_for_llado2025_desena_2020
+from utils.seed import set_seed
 from utils.miscellaneous import (load_npy_to_torch, 
                                 target_angle_for_listeners, 
                                 create_mtl_optimizer, 
@@ -41,47 +42,51 @@ from datasets.stimulus_dataset import get_stim_loader
 
 with open('config/hyperpameters.json', 'r') as f:
     config = json.load(f)
+set_seed(config["env"]["seed"])
+device = torch.device(config["env"]["device"])
+dtype = getattr(torch, config["env"]["dtype"])
 mtl_optimizer = "cagrad" #config["training"]["mtl_optimizer"]
 skip_keys = config["saving"]["skip_keys"]
 use_tensorboard = config["saving"]["use_tensorboard"]
     
 sofaile = load_sofa("data/SOFA/SYMMETRIC_D1_48K_24bit_256tap_FIR_SOFA.sofa")
-hrirs = get_template_for_llado2025_desena_2020(sofaile)
-gtfb = load_npy_to_torch("data/banks/gtfb_48k.npy")
-lag_values = torch.arange(-0.001*48000, 0.001*48000 + 1, 1, dtype=torch.float32, device=hrirs.device) / 48000
+hrirs = get_template_for_llado2025_desena_2020(sofaile, device=device, dtype=dtype)
+gtfb = load_npy_to_torch("data/banks/gtfb_48k.npy", device=device, dtype=dtype)
+lag_values = torch.arange(-0.001*48000, 0.001*48000 + 1, 1, dtype=dtype, device=device) / 48000
 
 d = 2
-lstn_pos = torch.tensor([[0,0],[0, 0.5], [0, -0.5]])
-spk_pos = torch.tensor([[d*torch.cos(torch.deg2rad(torch.tensor(30))), d*torch.sin(torch.deg2rad(torch.tensor(30)))], 
-                        [d*torch.cos(torch.deg2rad(torch.tensor(30))), -d*torch.sin(torch.deg2rad(torch.tensor(30)))]])
+lstn_pos = torch.tensor([[0,0],[0, 0.5], [0, -0.5]], dtype=dtype, device=device)
+spk_pos = torch.tensor([[d*torch.cos(torch.deg2rad(torch.tensor(30, dtype=dtype, device=device))), d*torch.sin(torch.deg2rad(torch.tensor(30, dtype=dtype, device=device)))], 
+                        [d*torch.cos(torch.deg2rad(torch.tensor(30, dtype=dtype, device=device))), -d*torch.sin(torch.deg2rad(torch.tensor(30, dtype=dtype, device=device)))]], dtype=dtype, device=device)
 
-target_angle = 0.0
-target_position = torch.tensor([d * torch.cos(torch.deg2rad(torch.tensor(target_angle))), d * torch.sin(torch.deg2rad(torch.tensor(target_angle)))])
+target_angle = config["training"]["target_angle"]
+target_position = torch.tensor([d * torch.cos(torch.deg2rad(torch.tensor(target_angle, dtype=dtype, device=device))), d * torch.sin(torch.deg2rad(torch.tensor(target_angle, dtype=dtype, device=device)))], dtype=dtype, device=device)
 target_angles = target_angle_for_listeners(lstn_pos, target_position)
-target_cues = get_target_cues(target_angles.unsqueeze(-1), sofaile, gtfb)
+target_cues = get_target_cues(target_angles.unsqueeze(-1), sofaile, gtfb, device=device, dtype=dtype)
 
-llado_model = llado2025_grad_surgery(48000, hrirs, gtfb)
-desena_model = desena2020(48000, hrirs, gtfb)
-lsd_model = LSD(48000, sofaile, target_angles.unsqueeze(-1))
-cue_model = CueMatchingModel(48000, hrirs, gtfb)
+llado_model = llado2025_grad_surgery(48000, hrirs, gtfb, device=device, dtype=dtype)
+desena_model = desena2020(48000, hrirs, gtfb, device=device, dtype=dtype)
+lsd_model = LSD(48000, sofaile, target_angles.unsqueeze(-1), device=device, dtype=dtype)
+cue_model = CueMatchingModel(48000, hrirs, gtfb, device=device, dtype=dtype)
 
-prop = BinauralFreeFieldPropagation(48000, lstn_pos, spk_pos, sofaile)
+prop = BinauralFreeFieldPropagation(48000, lstn_pos, spk_pos, sofaile, device=device, dtype=dtype)
 
 n_sources = len(spk_pos)
-n_taps = 1024
+n_taps = config["filter_estimator"]["n_samples"]
 nn = MultiSourceFIR(n_taps, n_sources)
-filter_initialisation = {"init_weight": "middle_opp", "fs": 48000, "n_bands": 8, "band_mode": "log"}
+filter_initialisation = {"init_weight": "middle", "fs": 48000, "n_bands": 4, "band_mode": "log"}
 nn.set_filter_initialisation(**filter_initialisation)
-second_moment = SecondMoment(n_taps, n_sources)
+nn = nn.to(device=device, dtype=dtype)
+second_moment = SecondMoment(n_taps, n_sources, device=device, dtype=dtype)
 
 modelTrainer = ModelTrainer(
-    [llado_model, second_moment],
+    [llado_model, desena_model],
     weights=[1.0, 1.0],
 )
 
 targets = {
     "llado2025_grad_surgery": target_angles.unsqueeze(0),
-    "SecondMoment": torch.zeros(1, n_sources),
+    "desena2020": torch.zeros(1, len(lstn_pos), dtype=dtype, device=device),
 }
 
 stim_loader, stim_dataset = get_stim_loader(
@@ -94,6 +99,7 @@ stim_loader, stim_dataset = get_stim_loader(
     f_min=config["stimulus_dataset"]["f_min"],
     f_max=config["stimulus_dataset"]["f_max"],
     band_mode=config["stimulus_dataset"]["band_mode"],
+    erb_factor=config["stimulus_dataset"].get("erb_factor", 1.0),
     dataset_type=config["stimulus_dataset"]["dataset_type"],
     stimulus_type=config["stimulus_dataset"]["stimulus_type"],
     seed=config["env"]["seed"],
@@ -122,9 +128,11 @@ saving_manager.save("sofaile", sofaile)
 saving_manager.save("target_cues", target_cues)
 saving_manager.save("stimulus_dataset", config["stimulus_dataset"])
 saving_manager.save("filter_initialisation", filter_initialisation)
+saving_manager.save("seed", config["env"]["seed"])
+saving_manager.save("device", str(device))
 
 
-dummy_input = torch.ones(1,1)
+dummy_input = torch.ones(1, 1, dtype=dtype, device=device)
 n_listeners = len(lstn_pos)
 for epoch in range(config["training"]["num_epochs"]):
     batch_loss_dicts = []
@@ -134,6 +142,7 @@ for epoch in range(config["training"]["num_epochs"]):
     batch_mtl_saved = []
 
     for stim in stim_loader:
+        stim = stim.to(device=device, dtype=dtype)
         spk_filters = nn(dummy_input)
         binaural_signals = prop(stim, spk_filters)
 
