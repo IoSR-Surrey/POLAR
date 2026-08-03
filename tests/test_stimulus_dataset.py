@@ -10,7 +10,12 @@ import numpy as np
 import pytest
 import torch
 
-from datasets.stimulus_dataset.dataset import BandpassWhiteNoiseDataset, get_stim_loader, _erb_bandwidth
+from datasets.stimulus_dataset.dataset import (
+    BandpassWhiteNoiseDataset,
+    get_stim_loader,
+    _erb_bandwidth,
+    _hz_to_erb_rate,
+)
 
 FS = 48000
 N_BANDS = 8
@@ -246,7 +251,7 @@ def test_linear_bands_attenuate_out_of_band_frequencies(linear_dataset) -> None:
 
 
 def test_invalid_band_mode_raises() -> None:
-    with pytest.raises(ValueError, match="band_mode must be 'erb', 'linear', or 'log'"):
+    with pytest.raises(ValueError, match="band_mode must be 'erb', 'linear', 'log', or 'linear_erb'"):
         BandpassWhiteNoiseDataset(
             fs=FS,
             n_bands=4,
@@ -254,6 +259,111 @@ def test_invalid_band_mode_raises() -> None:
             band_mode="octave",
         )
 
+
+def test_invalid_erb_factor_raises() -> None:
+    with pytest.raises(ValueError, match="erb_factor must be > 0"):
+        BandpassWhiteNoiseDataset(
+            fs=FS,
+            n_bands=LINEAR_ERB_N_BANDS,
+            n_samples_per_band=1,
+            band_mode="linear_erb",
+            erb_factor=0.0,
+        )
+
+
+def test_linear_erb_raises_when_spectrum_not_covered() -> None:
+    with pytest.raises(ValueError, match="does not cover .* without holes"):
+        BandpassWhiteNoiseDataset(
+            fs=FS,
+            n_bands=8,
+            n_samples_per_band=1,
+            stimulus_length_ms=STIMULUS_LENGTH_MS,
+            ramp_time_ms=RAMP_TIME_MS,
+            band_mode="linear_erb",
+            erb_factor=1.0,
+        )
+
+
+LINEAR_ERB_N_BANDS = 42
+
+
+@pytest.fixture
+def linear_erb_dataset():
+    return BandpassWhiteNoiseDataset(
+        fs=FS,
+        n_bands=LINEAR_ERB_N_BANDS,
+        n_samples_per_band=SAMPLES_PER_BAND,
+        stimulus_length_ms=STIMULUS_LENGTH_MS,
+        ramp_time_ms=RAMP_TIME_MS,
+        band_mode="linear_erb",
+        erb_factor=1.0,
+    )
+
+
+def test_linear_erb_anchors_are_erb_rate_spaced(linear_erb_dataset) -> None:
+    erb_low, erb_high, erb_anchors, anchor_hz = linear_erb_dataset._linear_erb_anchor_centres()
+    expected = np.linspace(erb_low, erb_high, linear_erb_dataset.n_bands)
+    assert np.allclose(erb_anchors, expected)
+    assert anchor_hz[0] == pytest.approx(linear_erb_dataset.f_min)
+    assert anchor_hz[-1] == pytest.approx(linear_erb_dataset.f_max)
+
+
+def test_linear_erb_samples_centres_around_anchors(linear_erb_dataset) -> None:
+    erb_low, erb_high, erb_anchors, _ = linear_erb_dataset._linear_erb_anchor_centres()
+    delta = erb_anchors[1] - erb_anchors[0]
+    for band_idx in range(linear_erb_dataset.n_bands):
+        lo = max(erb_anchors[band_idx] - 0.5 * delta, erb_low)
+        hi = min(erb_anchors[band_idx] + 0.5 * delta, erb_high)
+        for sample_idx in range(linear_erb_dataset.n_samples_per_band):
+            dataset_idx = band_idx * linear_erb_dataset.n_samples_per_band + sample_idx
+            erb_c = _hz_to_erb_rate(linear_erb_dataset.centre_freqs[dataset_idx])
+            assert lo <= erb_c <= hi
+
+
+def test_linear_erb_samples_within_band_have_different_centres(linear_erb_dataset) -> None:
+    centres = [
+        linear_erb_dataset.centre_freqs[i]
+        for i in range(linear_erb_dataset.n_samples_per_band)
+    ]
+    assert centres[0] != centres[1]
+
+
+def test_linear_erb_bandwidth_is_erb_over_factor(linear_erb_dataset) -> None:
+    low_freqs, high_freqs = linear_erb_dataset._band_edges()
+    _, _, _, anchor_centres = linear_erb_dataset._linear_erb_anchor_centres()
+    expected_bw = _erb_bandwidth(anchor_centres) / linear_erb_dataset.erb_factor
+    assert np.allclose(high_freqs - low_freqs, expected_bw)
+
+
+def test_linear_erb_factor_narrows_bandwidth() -> None:
+    # Same n_bands / range so anchors match; factor=2 needs denser grid for coverage,
+    # so compare bandwidths at identical centres without constructing a factor=2 dataset.
+    wide = BandpassWhiteNoiseDataset(
+        fs=FS, n_bands=LINEAR_ERB_N_BANDS, n_samples_per_band=1, band_mode="linear_erb", erb_factor=1.0,
+        stimulus_length_ms=STIMULUS_LENGTH_MS, ramp_time_ms=RAMP_TIME_MS,
+    )
+    low_w, high_w = wide._band_edges()
+    _, _, _, centres = wide._linear_erb_anchor_centres()
+    low_n, high_n = wide._edges_from_centres(centres, bandwidth_scale=2.0)
+    assert np.allclose(high_n - low_n, 0.5 * (high_w - low_w))
+
+
+def test_linear_erb_anchor_bands_cover_spectrum_without_holes() -> None:
+    dataset = BandpassWhiteNoiseDataset(
+        fs=FS,
+        n_bands=48,
+        n_samples_per_band=1,
+        stimulus_length_ms=STIMULUS_LENGTH_MS,
+        ramp_time_ms=RAMP_TIME_MS,
+        f_min=20.0,
+        f_max=20000.0,
+        band_mode="linear_erb",
+        erb_factor=1.0,
+    )
+    low_freqs, high_freqs = dataset._band_edges()
+    assert low_freqs[0] <= dataset.f_min
+    assert high_freqs[-1] >= dataset.f_max
+    assert np.all(high_freqs[:-1] >= low_freqs[1:])
 
 @pytest.fixture
 def log_dataset():

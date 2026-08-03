@@ -72,3 +72,13 @@ def test_average_estimates_dicts() -> None:
     ]
     averaged = average_estimates_dicts(estimates)
     np.testing.assert_allclose(averaged["llado2025_grad_surgery"], torch.tensor([4.0, 5.0]))
+
+
+def test_average_estimates_dicts_unequal_batch_sizes() -> None:
+    estimates = [
+        {"llado2025_grad_surgery": torch.zeros(64, 3)},
+        {"llado2025_grad_surgery": torch.ones(32, 3)},
+    ]
+    averaged = average_estimates_dicts(estimates)
+    # (64*0 + 32*1) / 96
+    np.testing.assert_allclose(averaged["llado2025_grad_surgery"], torch.full((3,), 32 / 96))
