@@ -269,10 +269,45 @@ def _json_path(output_dir, key):
     return output_dir / "json" / f"{key}.json"
 
 
+def _is_json_config_list(value):
+    for item in value:
+        if isinstance(item, dict):
+            if not _is_json_config_dict(item):
+                return False
+        elif isinstance(item, (list, tuple)):
+            if not _is_json_config_list(item):
+                return False
+        elif isinstance(item, np.ndarray) or not _is_scalar_like(item):
+            return False
+    return True
+
+
+def _is_json_config_dict(value):
+    """True for plain config dicts (scalars/lists/nested dicts); False if any arrays."""
+    if not isinstance(value, dict) or not value:
+        return False
+    for item in value.values():
+        if isinstance(item, dict):
+            if not _is_json_config_dict(item):
+                return False
+        elif isinstance(item, (list, tuple)):
+            if not _is_json_config_list(item):
+                return False
+        elif isinstance(item, np.ndarray) or not _is_scalar_like(item):
+            return False
+    return True
+
+
 def _export_saved_values(key, values, output_dir):
     converted = [_to_numpy(v) for v in values]
 
     if converted and all(isinstance(v, dict) for v in converted):
+        # One-shot metadata/config dicts (stimulus_dataset, filter_initialisation, …)
+        # stay as a single JSON; multi-epoch dicts (loss_dict, …) stay split by key.
+        if len(converted) == 1 and _is_json_config_dict(converted[0]):
+            path = _json_path(output_dir, key)
+            _write_json(path, converted[0])
+            return {"format": "json", "path": path.relative_to(output_dir).as_posix(), "n_entries": 1}
         return _export_dict_series(key, converted, output_dir)
 
     if len(converted) == 1:
