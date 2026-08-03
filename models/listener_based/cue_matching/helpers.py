@@ -3,12 +3,12 @@ import numpy as np
 from utils.sofa_functions import sofa_find, get_IRs
 from utils.peripheral_processing import estimate_interaural_cues
 
-def get_target_cues(target_angles, sofaile, gtfb, fs=48000):
+def get_target_cues(target_angles, sofaile, gtfb, fs=48000, device='cpu', dtype=torch.float32):
 
     target_idx = sofa_find(target_angles, sofaile)
-    target_hrirs = get_IRs(target_idx, sofaile)
+    target_hrirs = get_IRs(target_idx, sofaile, device=device, dtype=dtype)
 
-    lag_values = torch.arange(-0.001*fs, 0.001*fs + 1, 1, dtype=torch.float32, device=target_hrirs.device) / fs
+    lag_values = torch.arange(-0.001*fs, 0.001*fs + 1, 1, dtype=dtype, device=device) / fs
 
     cues = estimate_interaural_cues(target_hrirs, gtfb, lag_values)
 

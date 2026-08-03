@@ -23,7 +23,7 @@ class LSD(nn.Module):
         target_idx = sofa_find(self.target_angles, sofaile)
         self.target_hrirs = get_IRs(target_idx, sofaile, device=device, dtype=dtype)
 
-        self.fft_frequencies = torch.fft.rfftfreq(n_fft, 1/fs)
+        self.fft_frequencies = torch.fft.rfftfreq(n_fft, 1/fs, device=device, dtype=dtype)
         self.erb_frequency_bin_weights = self._erb_frequency_bin_weights()
 
         self.freq_bin_mask = (self.fft_frequencies >= self.f_min) & (self.fft_frequencies <= self.f_max)
