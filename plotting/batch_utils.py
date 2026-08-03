@@ -32,6 +32,10 @@ def get_white_noise_batch(config, device=None, dtype=None, shuffle=False):
         ramp_time_ms=stimulus_config["ramp_time_ms"],
         f_min=stimulus_config["f_min"],
         f_max=stimulus_config["f_max"],
+        band_mode=stimulus_config.get("band_mode", "erb"),
+        erb_factor=stimulus_config.get("erb_factor", 1.0),
+        dataset_type=stimulus_config.get("dataset_type", "bandpass"),
+        stimulus_type=stimulus_config.get("stimulus_type", "impulse"),
         shuffle=shuffle,
         num_workers=training_config["num_workers"],
         pin_memory=training_config["pin_memory"],
@@ -81,8 +85,9 @@ def average_loss_dicts(loss_dicts):
 
 
 def average_estimates_dicts(estimates_dicts):
+    # cat then mean so a smaller final batch (drop_last=False) is handled correctly
     return {
-        key: torch.stack([estimates[key].detach() for estimates in estimates_dicts]).mean(dim=(0, 1))
+        key: torch.cat([estimates[key].detach() for estimates in estimates_dicts], dim=0).mean(dim=0)
         for key in estimates_dicts[0]
     }
 
