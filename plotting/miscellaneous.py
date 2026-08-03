@@ -53,16 +53,31 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager, show_plots=False):
     
     if "llado2025_grad_surgery_cues" in saving_manager.saved_data:
         final_cues = saving_manager.saved_data["llado2025_grad_surgery_cues"][-1]
+        localisation_angles = (
+            saving_manager.saved_data["localisation_angles"][0]
+            if "localisation_angles" in saving_manager.saved_data
+            else None
+        )
+        if "target_position" in saving_manager.saved_data and "lstn_pos" in saving_manager.saved_data:
+            target_angle = ready_for_plotting(
+                target_angle_for_listeners(
+                    saving_manager.saved_data["lstn_pos"][0],
+                    saving_manager.saved_data["target_position"][0],
+                )
+            )
+        else:
+            target_angle = saving_manager.saved_data["target_angle"][0]
         itd_ild_scatter_plot(
             final_cues["itd"],
             final_cues["ild"],
             saving_manager.saved_data["sofaile"][0],
-            saving_manager.saved_data["target_angle"][0],
+            target_angle,
             saving_manager.saved_data["gtfb"][0],
             saving_manager.saved_data["lag_values"][0],
             saving_manager.saved_data["tau_iacc"][0],
             n_listeners=n_listeners,
             listener_labels=listener_labels,
+            localisation_angles=localisation_angles,
         )
         saving_manager.save_new_plots("itd_ild_scatter")
         if len(saving_manager.saved_data["llado2025_grad_surgery_cues"]) > 1:

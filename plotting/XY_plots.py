@@ -44,30 +44,77 @@ def frequency_domain_filters_plot(filters, fs=48000, nfft = 2048):
         filters = filters[-1][0]  # (epoch, batch, n_sources, n_taps) -> (n_sources, n_taps)
     
     n_filters = filters.shape[0]
-    n_samples = filters.shape[1]
     
-    filters = np.fft.rfft(filters, axis=1, n=nfft)
-    filters_db = 20*np.log10(np.abs(filters) + 1e-10)
+    filters_fft = np.fft.rfft(filters, axis=1, n=nfft)
+    filters_db = 20*np.log10(np.abs(filters_fft) + 1e-10)
+    filters_phase = np.unwrap(np.angle(filters_fft), axis=1)
     frequency_axis = np.fft.rfftfreq(nfft, 1/fs)
+
+    # Relative phase of each filter w.r.t. filter 1 (via complex ratio, then unwrap)
+    relative_phases = []
+    relative_labels = []
+    for i in range(1, n_filters):
+        relative_phases.append(np.unwrap(np.angle(filters_fft[i] * np.conj(filters_fft[0]))))
+        relative_labels.append(f"Filter {i+1} − Filter 1")
     
     vmin = np.min(filters_db)
     vmax = np.max(filters_db)
 
-    grid_size = int(np.ceil(np.sqrt(n_filters)))
-    fig, ax = plt.subplots(grid_size, grid_size, figsize=(10, 10), squeeze=False)
+    # mag per filter + overlaid mag + phase per filter + overlaid phase + relative phase
+    n_plots = 2 * n_filters + 3
+    grid_size = int(np.ceil(np.sqrt(n_plots)))
+    fig, ax = plt.subplots(grid_size, grid_size, figsize=(12, 12), squeeze=False)
     ax = ax.ravel()
 
     for i in range(n_filters):
         ax[i].semilogx(frequency_axis, filters_db[i, :])
-        ax[i].set_title(f"Filter {i+1}")
+        ax[i].set_title(f"Filter {i+1} magnitude")
         ax[i].set_xlabel("Frequency (Hz)")
         ax[i].set_ylabel("Magnitude (dB)")
         ax[i].grid(True)
         ax[i].set_ylim(vmin, vmax)
-   
+
+    overlay_mag_idx = n_filters
+    for i in range(n_filters):
+        ax[overlay_mag_idx].semilogx(frequency_axis, filters_db[i, :], label=f"Filter {i+1}")
+    ax[overlay_mag_idx].set_title("Overlaid filter magnitudes")
+    ax[overlay_mag_idx].set_xlabel("Frequency (Hz)")
+    ax[overlay_mag_idx].set_ylabel("Magnitude (dB)")
+    ax[overlay_mag_idx].grid(True)
+    ax[overlay_mag_idx].set_ylim(vmin, vmax)
+    ax[overlay_mag_idx].legend()
+
+    phase_start = n_filters + 1
+    for i in range(n_filters):
+        ax[phase_start + i].semilogx(frequency_axis, filters_phase[i, :])
+        ax[phase_start + i].set_title(f"Filter {i+1} phase")
+        ax[phase_start + i].set_xlabel("Frequency (Hz)")
+        ax[phase_start + i].set_ylabel("Phase (rad)")
+        ax[phase_start + i].grid(True)
+
+    overlay_phase_idx = phase_start + n_filters
+    for i in range(n_filters):
+        ax[overlay_phase_idx].semilogx(frequency_axis, filters_phase[i, :], label=f"Filter {i+1}")
+    ax[overlay_phase_idx].set_title("Overlaid filter phases")
+    ax[overlay_phase_idx].set_xlabel("Frequency (Hz)")
+    ax[overlay_phase_idx].set_ylabel("Phase (rad)")
+    ax[overlay_phase_idx].grid(True)
+    ax[overlay_phase_idx].legend()
+
+    rel_phase_idx = overlay_phase_idx + 1
+    for rel, label in zip(relative_phases, relative_labels):
+        ax[rel_phase_idx].semilogx(frequency_axis, rel, label=label)
+    if n_filters == 1:
+        ax[rel_phase_idx].set_title("Relative phase (N/A for single filter)")
+    else:
+        ax[rel_phase_idx].set_title("Relative phase")
+        ax[rel_phase_idx].legend()
+    ax[rel_phase_idx].set_xlabel("Frequency (Hz)")
+    ax[rel_phase_idx].set_ylabel("Phase (rad)")
+    ax[rel_phase_idx].grid(True)
 
     # Hide any unused subplots
-    for j in range(n_filters, grid_size * grid_size):
+    for j in range(n_plots, grid_size * grid_size):
         ax[j].axis('off')
 
     plt.tight_layout()

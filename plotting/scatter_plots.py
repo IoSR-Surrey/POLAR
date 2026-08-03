@@ -5,7 +5,7 @@ from matplotlib import animation
 from utils.sofa_functions import sofa_find, get_IRs
 
 from utils.peripheral_processing import estimate_interaural_cues
-from utils.miscellaneous import ready_for_plotting
+from utils.miscellaneous import ready_for_plotting, target_angle_for_listeners
 
 def split_interaural_cues_by_listener(itd, ild, n_listeners):
 
@@ -36,6 +36,8 @@ def _compute_target_itd_ild(sofaile, target_angle, gtfb, lag_values, tau_iacc):
 
     idx = sofa_find(target_angle, sofaile)
     hrir = get_IRs(idx, sofaile)
+    gtfb = gtfb.to(device=hrir.device, dtype=hrir.dtype)
+    lag_values = lag_values.to(device=hrir.device, dtype=hrir.dtype)
     target_interaural_cues = estimate_interaural_cues(hrir, gtfb, lag_values, tau_iacc)
     return (
         ready_for_plotting(target_interaural_cues['itd']).ravel(),
@@ -84,7 +86,23 @@ def _add_critical_band_colorbar(fig, scatter, axes, label='Critical band index')
     fig.colorbar(scatter, cax=cbar_ax, label=label)
 
 
-def itd_ild_scatter_plot(estimated_itd, estimated_ild, sofaile, target_angle, gtfb, lag_values, tau_iacc, n_listeners=1, listener_labels=None):
+def _as_listener_angles(angles, n_listeners):
+    angles = np.atleast_1d(np.squeeze(ready_for_plotting(angles))).astype(float)
+    if angles.size == 1:
+        return np.repeat(angles, n_listeners)
+    if angles.size != n_listeners:
+        raise ValueError(f"Expected {n_listeners} listener angles, got {angles.size}")
+    return angles
+
+
+def _format_scatter_title(prefix, target_angle, perceived_angle=None):
+    target_str = f'{float(target_angle):.1f}°'
+    if perceived_angle is None:
+        return f'{prefix}{target_str}'
+    return f'{prefix}{target_str} (perceived {float(perceived_angle):.1f}°)'
+
+
+def itd_ild_scatter_plot(estimated_itd, estimated_ild, sofaile, target_angle, gtfb, lag_values, tau_iacc, n_listeners=1, listener_labels=None, localisation_angles=None):
 
     # Estimated points come from the saved final-epoch interaural cues (the same
     # grad-surgery pipeline used for the evolution GIF) so the two views agree.
@@ -92,14 +110,23 @@ def itd_ild_scatter_plot(estimated_itd, estimated_ild, sofaile, target_angle, gt
     if listener_labels is None:
         listener_labels = [f"VL {i}" for i in range(n_listeners)]
 
-    target_itd, target_ild = _compute_target_itd_ild(sofaile, target_angle, gtfb, lag_values, tau_iacc)
+    target_angles = _as_listener_angles(target_angle, n_listeners)
+
+    if localisation_angles is not None:
+        localisation_angles = np.atleast_1d(np.squeeze(ready_for_plotting(localisation_angles)))
+        if localisation_angles.size == 1 and n_listeners > 1:
+            localisation_angles = np.repeat(localisation_angles, n_listeners)
+        elif localisation_angles.size != n_listeners:
+            localisation_angles = None
 
     if n_listeners == 1:
         fig, ax = plt.subplots()
         cues_itd, cues_ild = listener_cues[0]
+        target_itd, target_ild = _compute_target_itd_ild(sofaile, target_angles[0], gtfb, lag_values, tau_iacc)
+        perceived = None if localisation_angles is None else localisation_angles[0]
         estimated_scatter = _scatter_itd_ild_from_arrays(
             ax, np.ravel(cues_itd), np.ravel(cues_ild), target_itd, target_ild,
-            f'ITD-ILD Scatter Plot for {target_angle}°',
+            _format_scatter_title('ITD-ILD Scatter Plot for ', target_angles[0], perceived),
         )
         fig.tight_layout()
         _add_critical_band_colorbar(fig, estimated_scatter, ax)
@@ -112,15 +139,19 @@ def itd_ild_scatter_plot(estimated_itd, estimated_ild, sofaile, target_angle, gt
 
     estimated_scatter = None
     for listener_idx, (cues_itd, cues_ild) in enumerate(listener_cues):
+        target_itd, target_ild = _compute_target_itd_ild(
+            sofaile, target_angles[listener_idx], gtfb, lag_values, tau_iacc,
+        )
+        perceived = None if localisation_angles is None else localisation_angles[listener_idx]
         estimated_scatter = _scatter_itd_ild_from_arrays(
             axes[listener_idx], np.ravel(cues_itd), np.ravel(cues_ild), target_itd, target_ild,
-            f'{listener_labels[listener_idx]} — {target_angle}°',
+            _format_scatter_title(f'{listener_labels[listener_idx]} — ', target_angles[listener_idx], perceived),
         )
 
     for j in range(n_listeners, len(axes)):
         axes[j].axis('off')
 
-    fig.suptitle(f'ITD-ILD Scatter Plot for {target_angle}°')
+    fig.suptitle('ITD-ILD Scatter Plot')
     fig.tight_layout(rect=[0, 0, 0.95, 0.96])
     _add_critical_band_colorbar(fig, estimated_scatter, axes[:n_listeners])
 
@@ -177,16 +208,20 @@ def itd_ild_scatter_evolution_gif(saving_manager, n_listeners, listener_labels=N
         return
 
     sofaile = saving_manager.saved_data["sofaile"][0]
-    target_angle = saving_manager.saved_data["target_angle"][0]
     gtfb = saving_manager.saved_data["gtfb"][0]
     lag_values = saving_manager.saved_data["lag_values"][0]
     tau_iacc = saving_manager.saved_data["tau_iacc"][0]
+    if "target_position" in saving_manager.saved_data and "lstn_pos" in saving_manager.saved_data:
+        target_angle = target_angle_for_listeners(
+            saving_manager.saved_data["lstn_pos"][0],
+            saving_manager.saved_data["target_position"][0],
+        )
+    else:
+        target_angle = saving_manager.saved_data["target_angle"][0]
+    target_angles = _as_listener_angles(target_angle, n_listeners)
 
     if listener_labels is None:
         listener_labels = [f"VL {i}" for i in range(n_listeners)]
-
-    target_itd, target_ild = _compute_target_itd_ild(sofaile, target_angle, gtfb, lag_values, tau_iacc)
-    pair_indices = np.arange(target_itd.size)
 
     if n_listeners == 1:
         fig, axes = plt.subplots()
@@ -202,6 +237,10 @@ def itd_ild_scatter_evolution_gif(saving_manager, n_listeners, listener_labels=N
     estimated_scatters = []
     for listener_idx in range(n_listeners):
         ax = axes[listener_idx]
+        target_itd, target_ild = _compute_target_itd_ild(
+            sofaile, target_angles[listener_idx], gtfb, lag_values, tau_iacc,
+        )
+        pair_indices = np.arange(target_itd.size)
         ax.scatter(
             target_itd, target_ild,
             c=pair_indices, cmap='viridis', marker='x', label='Target',
@@ -215,7 +254,7 @@ def itd_ild_scatter_evolution_gif(saving_manager, n_listeners, listener_labels=N
         )
         ax.legend()
         _style_itd_ild_axes(ax)
-        ax.set_title(f'{listener_labels[listener_idx]} — {target_angle}°')
+        ax.set_title(f'{listener_labels[listener_idx]} — {target_angles[listener_idx]:.1f}°')
         estimated_scatters.append(estimated_scatter)
 
     title = fig.suptitle(f'ITD-ILD Evolution — Epoch 0')
