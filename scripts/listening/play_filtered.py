@@ -405,9 +405,9 @@ def run_playback_loop(playlist, filter_sets, fs, device_index, channel_map_arg):
                 elif event.key == pygame.K_SPACE and not getattr(event, "repeat", 0):
                     player.toggle()
                 elif event.key == pygame.K_UP and not getattr(event, "repeat", 0):
-                    select_source(source_idx - 1)
-                elif event.key == pygame.K_DOWN and not getattr(event, "repeat", 0):
                     select_source(source_idx + 1)
+                elif event.key == pygame.K_DOWN and not getattr(event, "repeat", 0):
+                    select_source(source_idx - 1)
                 elif event.key == pygame.K_LEFT and not getattr(event, "repeat", 0):
                     select_folder(folder_idx - 1)
                 elif event.key == pygame.K_RIGHT and not getattr(event, "repeat", 0):
