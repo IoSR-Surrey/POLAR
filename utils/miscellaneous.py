@@ -1,3 +1,7 @@
+import json
+import subprocess
+from pathlib import Path
+
 import torch
 import numpy as np
 
@@ -7,6 +11,37 @@ from models.gradnorm import GradNorm
 from logger.saving import extract_loss_grad_and_norms
 
 from scipy.signal import firwin, lfilter
+
+
+def git_commit_info(cwd=None):
+    """Return {"commit": sha_or_None, "dirty": bool_or_None} for the repo at cwd."""
+    if cwd is None:
+        cwd = Path(__file__).resolve().parent.parent
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=cwd, text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+        dirty = bool(subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=cwd, text=True, stderr=subprocess.DEVNULL,
+        ).strip())
+        return {"commit": commit, "dirty": dirty}
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return {"commit": None, "dirty": None}
+
+
+def write_run_config(output_dir, run_config, filename="run_config.json"):
+    """Write run_config.json, attaching git commit info if missing."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload = dict(run_config)
+    if "git" not in payload:
+        payload["git"] = git_commit_info()
+    path = output_dir / filename
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+        f.write("\n")
+    return path
+
 
 def load_npy_to_torch(npy_file, device='cpu', dtype=torch.float32):
     return torch.from_numpy(np.load(npy_file)).to(device=device, dtype=dtype)
