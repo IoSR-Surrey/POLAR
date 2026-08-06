@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
 from utils.IKO_functions import compute_real_sh_matrix, num_hoa_channels
-from utils.miscellaneous import load_npy_to_torch
+from utils.miscellaneous import load_npy_to_torch, write_run_config
 from utils.sofa_functions import load_sofa, resample_sofa_ir, get_template_for_llado2025_desena_2020
 from models.cagrad import CAGrad
 from models.listener_based.llado2025.model import llado2025_grad_surgery
@@ -222,6 +222,20 @@ def main():
     output_dir = Path("outputs") / "iko_brir_noise_seed_opt" / timestamp
     plots_dir = output_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
+    write_run_config(output_dir, {
+        "script": "scripts/IKO/IKO_brir_noise_seed_opt.py",
+        "config": config,
+        "args": {
+            "n_seeds": args.n_seeds,
+            "n_epochs": args.n_epochs,
+            "signal_length": args.signal_length,
+            "seed": args.seed,
+        },
+        "target_angle": target_angle,
+        "lr": lr,
+        "lambdas": lambdas,
+        "cagrad_c": cagrad_c,
+    })
 
     seeds = [args.seed + i for i in range(args.n_seeds)]
     results = []

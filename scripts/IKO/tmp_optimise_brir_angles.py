@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
 from utils.seed import set_seed
+from utils.miscellaneous import write_run_config
 
 ANGLES = [0, -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15, -16, -17, -18, -19, -20]
 HYPERPARAMETERS_PATH = ROOT / "config" / "hyperpameters.json"
@@ -107,6 +108,16 @@ def main():
     with open(MANIFEST_PATH, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=4)
         f.write("\n")
+    write_run_config(OUTPUTS_ROOT, {
+        "script": "scripts/IKO/tmp_optimise_brir_angles.py",
+        "angles": ANGLES,
+        "duration_s": DURATION_S,
+        "ramp_s": RAMP_S,
+        "target_peak": TARGET_PEAK,
+        "stage": STAGE,
+        "manifest": manifest,
+        "config": load_config(),
+    }, filename="angle_sweep_run_config.json")
     print(f"\nWrote manifest to {MANIFEST_PATH}")
     print("Done.")
 

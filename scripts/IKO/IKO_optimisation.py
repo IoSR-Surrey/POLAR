@@ -18,7 +18,7 @@ os.chdir(ROOT)
 
 from propagation.helpers import _calculate_source_angle_2D
 from utils.IKO_functions import compute_real_sh_matrix, num_hoa_channels
-from utils.miscellaneous import load_npy_to_torch
+from utils.miscellaneous import load_npy_to_torch, write_run_config
 from utils.seed import set_seed
 from utils.sofa_functions import load_sofa, resample_sofa_ir, get_template_for_llado2025_desena_2020, get_IRs, sofa_find
 from logger.saving import extract_loss_grad_and_norms, task_grad_pairwise_cosine_similarity_stats
@@ -808,8 +808,42 @@ def main():
     print(f"Optimiser step: {'CAGrad (c=' + str(cagrad_c) + ', tasks=' + str(active_tasks) + ')' if use_cagrad else 'plain weighted sum'}")
     print(f"HOA components: {'2D sectoral only (|m| = n)' if use_2d_harmonics else 'full 3D'}")
     print(f"Loss weights: {lambdas}")
+    optim_config = {
+        "use_cagrad": use_cagrad,
+        "use_2d_harmonics": use_2d_harmonics,
+        "cagrad_c": cagrad_c,
+        "loss_weights": lambdas,
+    }
     with open(output_dir / "optim_config.json", "w") as f:
-        json.dump({"use_cagrad": use_cagrad, "use_2d_harmonics": use_2d_harmonics, "cagrad_c": cagrad_c, "loss_weights": lambdas}, f, indent=2)
+        json.dump(optim_config, f, indent=2)
+    write_run_config(output_dir, {
+        "script": "scripts/IKO/IKO_optimisation.py",
+        "config": config,
+        "optim_config": optim_config,
+        "env": {
+            "fs": fs,
+            "device": device,
+            "dtype": "float32",
+            "seed": config["env"]["seed"],
+            "sofa_path": "data/SOFA/mit_kemar_large_pinna.sofa",
+            "gtfb_path": "data/banks/gtfb_48k.npy",
+        },
+        "geometry": {
+            "d": d,
+            "speaker_angles_deg": [30.0, -30.0],
+            "listeners": [[0.0, 0.0]],
+            "reflector_attenuation": reflector_attenuation,
+        },
+        "iko_order": iko_order,
+        "n_epochs": n_epochs,
+        "lr": lr,
+        "target_angle": target_angle,
+        "lobe_half_width_deg": lobe_half_width_deg,
+        "pattern_num_points": pattern_num_points,
+        "vertical_elevation_deg": vertical_elevation_deg,
+        "vertical_num_azimuths": vertical_num_azimuths,
+        "optimizer": "Adam",
+    })
 
     signal = torch.zeros(1, 256, device=device, dtype=dtype)
     signal[0, 0] = 1.0  # unit impulse (deterministic stimulus)

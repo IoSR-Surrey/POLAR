@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
 from utils.IKO_functions import num_hoa_channels
-from utils.miscellaneous import load_npy_to_torch
+from utils.miscellaneous import load_npy_to_torch, write_run_config
 from utils.sofa_functions import load_sofa, resample_sofa_ir, get_template_for_llado2025_desena_2020
 from models.listener_based.llado2025.model import llado2025_grad_surgery
 
@@ -108,6 +108,17 @@ def main():
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     output_dir = Path("outputs") / "iko_brir_init_noise_sweep" / timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
+    write_run_config(output_dir, {
+        "script": "scripts/IKO/IKO_brir_init_noise_sweep.py",
+        "config": config,
+        "args": {
+            "stimulus": args.stimulus,
+            "n_trials": args.n_trials,
+            "signal_length": args.signal_length,
+            "seed": base_seed,
+        },
+        "target_angle": target_angle,
+    })
 
     azimuths = np.empty(args.n_trials, dtype=np.float64)
     loc_losses = np.empty(args.n_trials, dtype=np.float64)
