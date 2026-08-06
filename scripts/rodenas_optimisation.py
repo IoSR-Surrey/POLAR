@@ -20,7 +20,9 @@ from utils.miscellaneous import (load_npy_to_torch,
                                 target_angle_for_listeners,
                                 create_mtl_optimizer,
                                 run_mtl_optimizer_step,
-                                generate_low_pass_stimulus)
+                                generate_low_pass_stimulus,
+                                git_commit_info,
+                                write_run_config)
 from filter_estimation.model import MultiSourceFIR
 from propagation.model import BinauralFreeFieldPropagation
 from models.listener_based.llado2025.model import llado2025_grad_surgery
@@ -744,6 +746,33 @@ saving_manager = SavingManager(
     task_names=list(modelTrainer.model_dict.keys()),
 )
 
+git_info = git_commit_info()
+run_config = {
+    "script": "scripts/rodenas_optimisation.py",
+    "git": git_info,
+    "config": config,
+    "mtl_optimizer": mtl_optimizer,
+    "sofa_path": "data/SOFA/SYMMETRIC_D1_48K_24bit_256tap_FIR_SOFA.sofa",
+    "gtfb_path": "data/banks/gtfb_48k.npy",
+    "apply_distance_attenuation": True,
+    "fs": 48000,
+    "n_taps": n_taps,
+    "n_sources": n_sources,
+    "speakers_per_array": speakers_per_array,
+    "speaker_distance": speaker_distance,
+    "speaker_spacing_m": speaker_spacing_m,
+    "num_lstn_pos": num_lstn_pos,
+    "target_angle": target_angle,
+    "model_weights": [1.0, 0.1],
+    "optimizer": "Adam",
+    "lr": 0.1,
+    "filter_initialisation": "middle",
+    "stimulus": {"type": "low_pass", "cutoff_hz": 1000, "fs": 48000, "length": 512},
+}
+write_run_config(saving_manager.output_dir, run_config)
+saving_manager.save("run_config", run_config)
+saving_manager.save("git_commit", git_info["commit"])
+saving_manager.save("git_dirty", git_info["dirty"])
 saving_manager.save("gtfb", gtfb)
 saving_manager.save("lag_values", lag_values)
 saving_manager.save("tau_iacc", 1e-2)
