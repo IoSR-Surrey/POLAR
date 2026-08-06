@@ -15,7 +15,9 @@ from utils.seed import set_seed
 from utils.miscellaneous import (load_npy_to_torch, 
                                 target_angle_for_listeners, 
                                 create_mtl_optimizer, 
-                                run_mtl_optimizer_step)
+                                run_mtl_optimizer_step,
+                                git_commit_info,
+                                write_run_config)
 from utils.dsp import magnitude_squared_coherence
 
 from filter_estimation.model import MultiSourceFIR
@@ -48,49 +50,65 @@ dtype = getattr(torch, config["env"]["dtype"])
 mtl_optimizer = "cagrad" #config["training"]["mtl_optimizer"]
 skip_keys = config["saving"]["skip_keys"]
 use_tensorboard = config["saving"]["use_tensorboard"]
-    
-sofaile = load_sofa("data/SOFA/SYMMETRIC_D1_48K_24bit_256tap_FIR_SOFA.sofa")
-hrirs = get_template_for_llado2025_desena_2020(sofaile, device=device, dtype=dtype)
-gtfb = load_npy_to_torch("data/banks/gtfb_48k.npy", device=device, dtype=dtype)
-lag_values = torch.arange(-0.001*48000, 0.001*48000 + 1, 1, dtype=dtype, device=device) / 48000
-
+fs = config["env"]["fs"]
+sofa_path = "data/SOFA/SYMMETRIC_D1_48K_24bit_256tap_FIR_SOFA.sofa"
+gtfb_path = "data/banks/gtfb_48k.npy"
+apply_distance_attenuation = config["env"]["apply_distance_attenuation"]
+lag_window_s = 0.001
+tau_iacc = 1e-2
 d = 2
-lstn_pos = torch.tensor([[0,0],[0, 0.5], [0, -0.5]], dtype=dtype, device=device)
-spk_pos = torch.tensor([[d*torch.cos(torch.deg2rad(torch.tensor(30, dtype=dtype, device=device))), d*torch.sin(torch.deg2rad(torch.tensor(30, dtype=dtype, device=device)))], 
-                        [d*torch.cos(torch.deg2rad(torch.tensor(30, dtype=dtype, device=device))), -d*torch.sin(torch.deg2rad(torch.tensor(30, dtype=dtype, device=device)))]], dtype=dtype, device=device)
+speaker_angles_deg = [30.0, -30.0]
+listeners = [[0.0, 0.0], [0.0, 0.5], [0.0, -0.5]]
+# Convex task balance: lambda_loc on llado, (1-lambda_loc) on LSD.
+# Scaled to sum=2 so lambda_loc=0.5 matches historical [1.0, 1.0] weights.
+lambda_loc = float(config["training"].get("lambda_loc", 0.5))
+lambda_loc = min(max(lambda_loc, 0.0), 1.0)
+model_weights = [2.0 * lambda_loc, 2.0 * (1.0 - lambda_loc)]
+filter_initialisation = {"init_weight": "middle", "fs": fs, "n_bands": 4, "band_mode": "log"}
+    
+sofaile = load_sofa(sofa_path)
+hrirs = get_template_for_llado2025_desena_2020(sofaile, device=device, dtype=dtype)
+gtfb = load_npy_to_torch(gtfb_path, device=device, dtype=dtype)
+lag_values = torch.arange(-lag_window_s * fs, lag_window_s * fs + 1, 1, dtype=dtype, device=device) / fs
+
+lstn_pos = torch.tensor(listeners, dtype=dtype, device=device)
+speaker_angles = torch.tensor(speaker_angles_deg, dtype=dtype, device=device)
+spk_pos = torch.stack([
+    d * torch.cos(torch.deg2rad(speaker_angles)),
+    d * torch.sin(torch.deg2rad(speaker_angles)),
+], dim=1)
 
 target_angle = config["training"]["target_angle"]
 target_position = torch.tensor([d * torch.cos(torch.deg2rad(torch.tensor(target_angle, dtype=dtype, device=device))), d * torch.sin(torch.deg2rad(torch.tensor(target_angle, dtype=dtype, device=device)))], dtype=dtype, device=device)
 target_angles = target_angle_for_listeners(lstn_pos, target_position)
 target_cues = get_target_cues(target_angles.unsqueeze(-1), sofaile, gtfb, device=device, dtype=dtype)
 
-llado_model = llado2025_grad_surgery(48000, hrirs, gtfb, device=device, dtype=dtype)
-desena_model = desena2020(48000, hrirs, gtfb, device=device, dtype=dtype)
-lsd_model = LSD(48000, sofaile, target_angles.unsqueeze(-1), device=device, dtype=dtype)
-cue_model = CueMatchingModel(48000, hrirs, gtfb, device=device, dtype=dtype)
+llado_model = llado2025_grad_surgery(fs, hrirs, gtfb, device=device, dtype=dtype)
+desena_model = desena2020(fs, hrirs, gtfb, device=device, dtype=dtype)
+lsd_model = LSD(fs, sofaile, target_angles.unsqueeze(-1), device=device, dtype=dtype)
+cue_model = CueMatchingModel(fs, hrirs, gtfb, device=device, dtype=dtype)
 
-prop = BinauralFreeFieldPropagation(48000, lstn_pos, spk_pos, sofaile, device=device, dtype=dtype)
+prop = BinauralFreeFieldPropagation(fs, lstn_pos, spk_pos, sofaile, apply_distance_attenuation=apply_distance_attenuation, device=device, dtype=dtype)
 
 n_sources = len(spk_pos)
 n_taps = config["filter_estimator"]["n_samples"]
 nn = MultiSourceFIR(n_taps, n_sources)
-filter_initialisation = {"init_weight": "middle", "fs": 48000, "n_bands": 4, "band_mode": "log"}
 nn.set_filter_initialisation(**filter_initialisation)
 nn = nn.to(device=device, dtype=dtype)
 second_moment = SecondMoment(n_taps, n_sources, device=device, dtype=dtype)
 
 modelTrainer = ModelTrainer(
-    [llado_model, desena_model],
-    weights=[1.0, 1.0],
+    [llado_model, lsd_model],
+    weights=model_weights,
 )
 
 targets = {
     "llado2025_grad_surgery": target_angles.unsqueeze(0),
-    "desena2020": torch.zeros(1, len(lstn_pos), dtype=dtype, device=device),
+    "LSD": torch.zeros_like(target_angles.unsqueeze(0)),
 }
 
 stim_loader, stim_dataset = get_stim_loader(
-    fs=config["env"]["fs"],
+    fs=fs,
     n_bands=config["stimulus_dataset"]["n_bands"],
     n_samples_per_band=config["stimulus_dataset"]["n_samples_per_band"],
     batch_size=config["training"]["batch_size"],
@@ -109,19 +127,69 @@ stim_loader, stim_dataset = get_stim_loader(
     drop_last=config["training"]["drop_last"],
 )
 
-optimizer = torch.optim.Adam(nn.parameters(), lr=0.01)
-mtl = create_mtl_optimizer(modelTrainer, mtl_optimizer)
+optimizer = torch.optim.Adam(nn.parameters(), lr=config["training"]["lr"])
+mtl = create_mtl_optimizer(modelTrainer, mtl_optimizer, training_config=config["training"])
 
 saving_manager = SavingManager(
     f"outputs/{mtl_optimizer}", skip_keys=skip_keys, timestamp=True, use_tensorboard=use_tensorboard,
     task_names=list(modelTrainer.model_dict.keys()),
 )
 
+git_info = git_commit_info()
+run_config = {
+    "script": "scripts/scratch.py",
+    "git": git_info,
+    "config": config,
+    "env": {
+        "fs": fs,
+        "device": str(device),
+        "dtype": config["env"]["dtype"],
+        "seed": config["env"]["seed"],
+        "deterministic": config["env"].get("deterministic", False),
+        "sofa_path": sofa_path,
+        "gtfb_path": gtfb_path,
+        "apply_distance_attenuation": apply_distance_attenuation,
+    },
+    "geometry": {
+        "d": d,
+        "speaker_angles_deg": speaker_angles_deg,
+        "listeners": listeners,
+    },
+    "filter_estimator": {
+        "n_samples": n_taps,
+        "n_sources": n_sources,
+        "filter_initialisation": filter_initialisation,
+    },
+    "models": [
+        {"name": name, "weight": weight}
+        for name, weight in zip(modelTrainer.model_dict.keys(), model_weights)
+    ],
+    "lambda_loc": lambda_loc,
+    "targets": {
+        "llado2025_grad_surgery": "target_angles",
+        "LSD": 0.0,
+    },
+    "training": {
+        **config["training"],
+        "mtl_optimizer": mtl_optimizer,
+        "optimizer": "Adam",
+    },
+    "stimulus_dataset": config["stimulus_dataset"],
+    "llado2025_grad_surgery": config.get("llado2025_grad_surgery", {}),
+    "lag_window_s": lag_window_s,
+    "tau_iacc": tau_iacc,
+}
+
+write_run_config(saving_manager.output_dir, run_config)
+saving_manager.save("run_config", run_config)
+saving_manager.save("git_commit", git_info["commit"])
+saving_manager.save("git_dirty", git_info["dirty"])
 saving_manager.save("gtfb", gtfb)
 saving_manager.save("lag_values", lag_values)
-saving_manager.save("tau_iacc", 1e-2)
+saving_manager.save("tau_iacc", tau_iacc)
 saving_manager.save("target_angle", target_angle)
 saving_manager.save("target_position", target_position)
+saving_manager.save("target_angles", target_angles)
 saving_manager.save("lstn_pos", lstn_pos)
 saving_manager.save("spk_pos", spk_pos)
 saving_manager.save("sofaile", sofaile)
@@ -130,6 +198,19 @@ saving_manager.save("stimulus_dataset", config["stimulus_dataset"])
 saving_manager.save("filter_initialisation", filter_initialisation)
 saving_manager.save("seed", config["env"]["seed"])
 saving_manager.save("device", str(device))
+saving_manager.save("dtype", config["env"]["dtype"])
+saving_manager.save("fs", fs)
+saving_manager.save("sofa_path", sofa_path)
+saving_manager.save("gtfb_path", gtfb_path)
+saving_manager.save("apply_distance_attenuation", apply_distance_attenuation)
+saving_manager.save("mtl_optimizer", mtl_optimizer)
+saving_manager.save("n_taps", n_taps)
+saving_manager.save("n_sources", n_sources)
+saving_manager.save("model_weights", model_weights)
+saving_manager.save("lambda_loc", lambda_loc)
+saving_manager.save("lr", config["training"]["lr"])
+saving_manager.save("num_epochs", config["training"]["num_epochs"])
+saving_manager.save("batch_size", config["training"]["batch_size"])
 
 
 dummy_input = torch.ones(1, 1, dtype=dtype, device=device)
@@ -200,5 +281,5 @@ with torch.no_grad():
 saving_manager.export_to_disk()
 print(f"Saved outputs to {saving_manager.output_dir}")
 
-ALL_PLOTTING_FUNCTIONS(saving_manager, show_plots=True)
+ALL_PLOTTING_FUNCTIONS(saving_manager, show_plots=False)
 saving_manager.close()

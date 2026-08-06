@@ -35,6 +35,8 @@ from utils.miscellaneous import (
     target_angle_for_listeners,
     create_mtl_optimizer,
     run_mtl_optimizer_step,
+    git_commit_info,
+    write_run_config,
 )
 from filter_estimation.model import MultiSourceFIR
 from propagation.model import BinauralFreeFieldPropagation
@@ -197,6 +199,24 @@ def run_condition(condition, study_root, config, shared, seed, num_epochs, run_p
         use_tensorboard=False, task_names=list(model_trainer.model_dict.keys()),
     )
 
+    git_info = git_commit_info()
+    run_config = {
+        "script": "scripts/tap_loss_ablation.py",
+        "git": git_info,
+        "condition": condition,
+        "config": config,
+        "mtl_optimizer": MTL_OPTIMIZER,
+        "learning_rate": LEARNING_RATE,
+        "num_epochs": num_epochs,
+        "seed": seed,
+        "filter_initialisation": FILTER_INITIALISATION,
+        "n_taps": n_taps,
+        "loss_set": loss_set,
+    }
+    write_run_config(output_dir, run_config)
+    saving_manager.save("run_config", run_config)
+    saving_manager.save("git_commit", git_info["commit"])
+    saving_manager.save("git_dirty", git_info["dirty"])
     saving_manager.save("gtfb", gtfb)
     saving_manager.save("lag_values", shared["lag_values"])
     saving_manager.save("tau_iacc", 1e-2)
@@ -492,17 +512,18 @@ def run_study(
     shared = load_shared_assets(config)
     conditions = build_conditions(tap_counts, loss_set_names)
 
-    with open(study_root / "study_config.json", "w", encoding="utf-8") as f:
-        json.dump({
-            "conditions": conditions,
-            "num_epochs": num_epochs,
-            "seed": seed,
-            "mtl_optimizer": MTL_OPTIMIZER,
-            "learning_rate": LEARNING_RATE,
-            "filter_initialisation": FILTER_INITIALISATION,
-            "stimulus_dataset": config["stimulus_dataset"],
-            "training": config["training"],
-        }, f, indent=2)
+    write_run_config(study_root, {
+        "script": "scripts/tap_loss_ablation.py",
+        "conditions": conditions,
+        "num_epochs": num_epochs,
+        "seed": seed,
+        "mtl_optimizer": MTL_OPTIMIZER,
+        "learning_rate": LEARNING_RATE,
+        "filter_initialisation": FILTER_INITIALISATION,
+        "stimulus_dataset": config["stimulus_dataset"],
+        "training": config["training"],
+        "config": config,
+    }, filename="study_config.json")
 
     results = []
     for index, condition in enumerate(conditions, start=1):

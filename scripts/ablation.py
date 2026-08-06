@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
 from utils.seed import set_seed
+from utils.miscellaneous import write_run_config
 from scripts.run_experiment import run_experiment
 from plotting.ablation_summary import plot_ablation_summary
 
@@ -99,6 +100,16 @@ def main():
     output_root = Path("outputs/ablation")
     rows = []
     all_results = []
+    write_run_config(output_root, {
+        "script": "scripts/ablation.py",
+        "config_path": args.config,
+        "config": config,
+        "optimizers": args.optimizers,
+        "lrs": args.lrs,
+        "loss_sets": args.loss_sets,
+        "num_epochs": NUM_EPOCHS,
+        "child_script": "scripts/run_experiment.py",
+    })
 
     for run_id, (loss_set, mtl_optimizer, lr) in enumerate(grid, start=1):
         print(f"[{run_id}/{total_runs}] {mtl_optimizer} | lr={lr} | {loss_set}")

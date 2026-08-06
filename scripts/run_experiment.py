@@ -10,6 +10,8 @@ from utils.miscellaneous import (
     target_angle_for_listeners,
     create_mtl_optimizer,
     run_mtl_optimizer_step,
+    git_commit_info,
+    write_run_config,
 )
 
 from filter_estimation.model import MultiSourceFIR
@@ -185,15 +187,20 @@ def run_experiment(
         task_names=list(model_trainer.model_dict.keys()),
     )
 
+    git_info = git_commit_info()
     run_config = {
+        "script": "scripts/run_experiment.py",
+        "git": git_info,
         "mtl_optimizer": mtl_optimizer,
         "loss_set": loss_set,
         "lr": training_config["lr"],
         "num_epochs": num_epochs,
         "config": config,
     }
-    with open(saving_manager.output_dir / "run_config.json", "w", encoding="utf-8") as f:
-        json.dump(run_config, f, indent=2)
+    write_run_config(saving_manager.output_dir, run_config)
+    saving_manager.save("run_config", run_config)
+    saving_manager.save("git_commit", git_info["commit"])
+    saving_manager.save("git_dirty", git_info["dirty"])
 
     saving_manager.save("gtfb", gtfb)
     saving_manager.save("lag_values", lag_values)
