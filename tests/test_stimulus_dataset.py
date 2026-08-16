@@ -414,3 +414,23 @@ def test_log_bands_attenuate_out_of_band_frequencies(log_dataset) -> None:
         if above_low < log_dataset.f_max:
             above_band_power = _mean_power_in_range(freqs, power, above_low, log_dataset.f_max)
             assert in_band_power > 30.0 * above_band_power
+
+
+def test_bandpass_dataset_plot_returns_two_axes() -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from plotting.XY_plots import bandpass_dataset_plot
+
+    dataset = BandpassWhiteNoiseDataset(
+        fs=FS,
+        n_bands=12,
+        n_samples_per_band=2,
+        stimulus_length_ms=5,
+        ramp_time_ms=1,
+        band_mode="linear_erb",
+        erb_factor=0.25,
+    )
+    fig, axes = bandpass_dataset_plot(dataset)
+    assert len(axes) == 2
+    plt.close(fig)

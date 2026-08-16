@@ -1,9 +1,13 @@
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch, Rectangle
 import numpy as np
+from scipy import signal
 
 from utils.miscellaneous import ready_for_plotting
 from utils.dsp import cosine_similarity
 from plotting.batch_utils import mean_over_stimulus_batch, reduce_batch_dimension
+from datasets.stimulus_dataset.dataset import _erb_bandwidth, _erb_rate_to_hz
 
 def time_domain_filters_plot(filters, fs=48000):
 
@@ -60,8 +64,8 @@ def frequency_domain_filters_plot(filters, fs=48000, nfft = 2048):
     vmin = np.min(filters_db)
     vmax = np.max(filters_db)
 
-    # mag per filter + overlaid mag + phase per filter + overlaid phase + relative phase
-    n_plots = 2 * n_filters + 3
+    # mag per filter + overlaid mag + phase per filter + overlaid phase + relative phase + relative mag
+    n_plots = 2 * n_filters + 4
     grid_size = int(np.ceil(np.sqrt(n_plots)))
     fig, ax = plt.subplots(grid_size, grid_size, figsize=(12, 12), squeeze=False)
     ax = ax.ravel()
@@ -112,6 +116,18 @@ def frequency_domain_filters_plot(filters, fs=48000, nfft = 2048):
     ax[rel_phase_idx].set_xlabel("Frequency (Hz)")
     ax[rel_phase_idx].set_ylabel("Phase (rad)")
     ax[rel_phase_idx].grid(True)
+
+    rel_mag_idx = rel_phase_idx + 1
+    for i in range(1, n_filters):
+        ax[rel_mag_idx].semilogx(frequency_axis, filters_db[i] - filters_db[0], label=f"Filter {i+1} − Filter 1")
+    if n_filters == 1:
+        ax[rel_mag_idx].set_title("Magnitude difference (N/A for single filter)")
+    else:
+        ax[rel_mag_idx].set_title("Magnitude difference")
+        ax[rel_mag_idx].legend()
+    ax[rel_mag_idx].set_xlabel("Frequency (Hz)")
+    ax[rel_mag_idx].set_ylabel("Magnitude (dB)")
+    ax[rel_mag_idx].grid(True)
 
     # Hide any unused subplots
     for j in range(n_plots, grid_size * grid_size):
@@ -410,3 +426,130 @@ def ear_signals_magnitude_phase_plot(binaural_signals, fs=48000, nfft=2048, list
         axes[i, 1].grid(True)
 
     plt.tight_layout()
+
+
+def _passband_edges(dataset, band_idx, dataset_idx):
+    if dataset.band_mode == "linear_erb":
+        centre_hz = float(dataset.centre_freqs[dataset_idx])
+        bandwidth = _erb_bandwidth(centre_hz) / dataset.erb_factor
+        low = max(centre_hz - bandwidth / 2, 1.0)
+        high = min(centre_hz + bandwidth / 2, dataset.fs / 2 - 1)
+        return low, high
+    low_freqs, high_freqs = dataset._band_edges()
+    return float(low_freqs[band_idx]), float(high_freqs[band_idx])
+
+
+def bandpass_dataset_plot(dataset):
+    """Illustrate band-pass tiling of a BandpassWhiteNoiseDataset.
+
+    Top: 4th-order Butterworth magnitude of every sample (colour = band).
+    Bottom: passbands, sampled centres, and (for linear_erb) sampling slices.
+    """
+    n_bands = dataset.n_bands
+    n_per_band = dataset.n_samples_per_band
+    cmap = plt.cm.viridis
+    colours = cmap(np.linspace(0.08, 0.92, n_bands))
+    freqs = np.geomspace(max(dataset.f_min * 0.5, 10.0), dataset.fs / 2 - 1, 4096)
+
+    fig, axes = plt.subplots(
+        2, 1, figsize=(10, 7.2), sharex=True, gridspec_kw={"height_ratios": [1.15, 1.0]}
+    )
+    ax_mag, ax_cov = axes
+
+    for band_idx in range(n_bands):
+        colour = colours[band_idx]
+        for sample_idx in range(n_per_band):
+            dataset_idx = band_idx * n_per_band + sample_idx
+            low, high = _passband_edges(dataset, band_idx, dataset_idx)
+            sos = signal.butter(4, [low, high], btype="band", fs=dataset.fs, output="sos")
+            _, h = signal.sosfreqz(sos, worN=freqs, fs=dataset.fs)
+            mag_db = 20 * np.log10(np.abs(h) + 1e-12)
+            ax_mag.semilogx(freqs, mag_db, color=colour, alpha=0.85, linewidth=1.1)
+
+    ax_mag.axhline(-3.0, color="0.45", linestyle=":", linewidth=0.9, zorder=0)
+    ax_mag.text(dataset.f_min, -3.0, " −3 dB", color="0.35", va="bottom", ha="left", fontsize=12)
+    ax_mag.set_ylabel("Magnitude (dB)", fontsize=14)
+    ax_mag.set_ylim(-55, 3)
+    ax_mag.tick_params(axis="both", labelsize=12)
+    ax_mag.grid(True, which="both", alpha=0.35)
+    ax_mag.set_title("4th-order Butterworth responses", fontsize=16)
+
+    slice_shown = False
+    for band_idx in range(n_bands):
+        colour = colours[band_idx]
+        y_band = band_idx
+
+        if dataset.band_mode == "linear_erb":
+            erb_low, erb_high, erb_anchors, _ = dataset._linear_erb_anchor_centres()
+            if n_bands == 1:
+                lo, hi = erb_low, erb_high
+            else:
+                delta = erb_anchors[1] - erb_anchors[0]
+                lo = max(erb_anchors[band_idx] - 0.5 * delta, erb_low)
+                hi = min(erb_anchors[band_idx] + 0.5 * delta, erb_high)
+            f_lo = _erb_rate_to_hz(lo)
+            f_hi = _erb_rate_to_hz(hi)
+            ax_cov.add_patch(Rectangle(
+                (f_lo, y_band - 0.42), f_hi - f_lo, 0.84,
+                facecolor=colour, edgecolor="none", alpha=0.28, zorder=0,
+            ))
+            slice_shown = True
+
+        offsets = np.linspace(-0.22, 0.22, n_per_band) if n_per_band > 1 else np.array([0.0])
+        for sample_idx in range(n_per_band):
+            dataset_idx = band_idx * n_per_band + sample_idx
+            fc = float(dataset.centre_freqs[dataset_idx])
+            low, high = _passband_edges(dataset, band_idx, dataset_idx)
+            y = y_band + offsets[sample_idx]
+            ax_cov.plot([low, high], [y, y], color=colour, linewidth=2.4, solid_capstyle="round", zorder=2)
+            ax_cov.plot(fc, y, "o", color=colour, markersize=4.6, markeredgecolor="0.15", markeredgewidth=0.4, zorder=3)
+
+    if dataset.band_mode == "linear_erb":
+        _, _, _, anchor_hz = dataset._linear_erb_anchor_centres()
+        ax_cov.plot(
+            anchor_hz, np.arange(n_bands),
+            marker="^", color="k", linestyle="none", markersize=6.5,
+            markerfacecolor="white", markeredgewidth=1.1, zorder=4, label="ERB anchor",
+        )
+        for ax in axes:
+            for f_a in anchor_hz:
+                ax.axvline(f_a, color="0.75", linestyle="--", linewidth=0.6, zorder=0)
+
+    ax_cov.set_xscale("log")
+    ax_cov.set_xlim(dataset.f_min * 0.7, min(dataset.f_max * 1.15, dataset.fs / 2 - 1))
+    ax_cov.set_ylim(-0.7, n_bands - 0.3)
+    ax_cov.set_yticks(np.arange(n_bands))
+    ax_cov.set_yticklabels([f"{i + 1}" for i in range(n_bands)])
+    ax_cov.set_ylabel("Band", fontsize=14)
+    ax_cov.set_xlabel("Frequency (Hz)", fontsize=14)
+    ax_cov.tick_params(axis="both", labelsize=12)
+    ax_cov.grid(True, axis="x", which="both", alpha=0.35)
+    ax_cov.set_title("Passbands, sampled centres, and ERB-rate coverage", fontsize=16)
+
+    legend_handles = [
+        Line2D([0], [0], color="0.3", linewidth=2.4, label="Passband ($f_c \\pm B/2$)"),
+        Line2D([0], [0], marker="o", color="0.3", linestyle="none",
+               markersize=5, markeredgecolor="k", markeredgewidth=0.4, label="Sampled $f_c$"),
+    ]
+    if dataset.band_mode == "linear_erb":
+        legend_handles.append(
+            Line2D([0], [0], marker="^", color="k", linestyle="none",
+                   markersize=7, markerfacecolor="white", markeredgewidth=1.1, label="ERB-rate anchor")
+        )
+        if slice_shown:
+            legend_handles.append(Patch(facecolor="0.5", alpha=0.25, edgecolor="none", label="Centre-frequency slice"))
+    ax_cov.legend(handles=legend_handles, loc="upper left", fontsize=12, framealpha=0.92)
+
+    if dataset.band_mode == "linear_erb":
+        bw_note = f"$B(f_c)=\\mathrm{{ERB}}(f_c)/{dataset.erb_factor:g}$"
+    elif dataset.band_mode == "erb":
+        bw_note = r"$B(f_c)=\mathrm{ERB}(f_c)$"
+    else:
+        bw_note = f"{dataset.band_mode} partitions of $[{dataset.f_min:g}, {dataset.f_max:g}]$ Hz"
+    fig.suptitle(
+        f"Band-pass dataset : "
+        f"{n_bands} bands $\\times$ {n_per_band} samples, {bw_note}",
+        fontsize=16,
+    )
+    fig.tight_layout()
+    return fig, axes
