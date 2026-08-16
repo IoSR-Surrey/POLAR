@@ -20,7 +20,6 @@ from utils.miscellaneous import (load_npy_to_torch,
                                 target_angle_for_listeners,
                                 create_mtl_optimizer,
                                 run_mtl_optimizer_step,
-                                generate_low_pass_stimulus,
                                 git_commit_info,
                                 write_run_config)
 from filter_estimation.model import MultiSourceFIR
@@ -31,8 +30,92 @@ from models.loudspeaker_based.second_moment.model import SecondMoment
 from models.train import ModelTrainer
 from logger.saving import SavingManager
 from logger.printing import print_loss_and_estimates
-from plotting.XY_plots import time_domain_filters_plot, frequency_domain_filters_plot
+from plotting.XY_plots import (
+    time_domain_filters_plot,
+    frequency_domain_filters_plot,
+    loss_over_epochs_plot,
+    plot_loss_and_estimates,
+    loss_grad_norms_over_epochs_plot,
+    cagrad_dual_weights_over_epochs_plot,
+    cagrad_task_coeffs_over_epochs_plot,
+    raw_grad_cosine_to_reference_plot,
+)
 from plotting.spatial_plots import localisation_arrows_plot
+from plotting.batch_utils import (
+    average_estimates_dicts,
+    average_interaural_cues_dicts,
+    average_loss_dicts,
+    average_mtl_saved_values,
+    get_white_noise_batch,
+)
+from datasets.stimulus_dataset import get_stim_loader
+
+
+def plot_rodenas_mtl_diagnostics(saving_manager):
+    """Loss curves and CAGrad cosine / weight diagnostics (same as scratch CAGrad branch)."""
+    if "loss_dict" in saving_manager.saved_data:
+        loss_over_epochs_plot(saving_manager.saved_data["loss_dict"], "Loss over epochs")
+        saving_manager.save_new_plots("loss_over_epochs")
+
+    if "loss_dict" in saving_manager.saved_data and "modelTrainer.estimates" in saving_manager.saved_data:
+        n_listeners = None
+        if "lstn_pos" in saving_manager.saved_data:
+            lstn = saving_manager.saved_data["lstn_pos"][0]
+            n_listeners = int(np.asarray(lstn.detach().cpu() if torch.is_tensor(lstn) else lstn).shape[0])
+        plot_loss_and_estimates(
+            saving_manager.saved_data["loss_dict"],
+            saving_manager.saved_data["modelTrainer.estimates"],
+            "Loss and Estimates",
+            n_listeners=n_listeners,
+        )
+        loss_names = [
+            f"loss_and_estimates_{key}"
+            for key in saving_manager.saved_data["loss_dict"][0].keys()
+            if key != "total"
+        ]
+        if "total" in saving_manager.saved_data["loss_dict"][0]:
+            loss_names.append("loss_and_estimates_total")
+        saving_manager.save_new_plots("loss_and_estimates", names=loss_names)
+
+    if "raw_grads" not in saving_manager.saved_data or "effective_grad" not in saving_manager.saved_data:
+        return
+
+    task_names = list(saving_manager.saved_data["raw_grads"][0].keys())
+    raw_grad_norms = [
+        {key: torch.norm(epoch_grads[key]) for key in epoch_grads}
+        for epoch_grads in saving_manager.saved_data["raw_grads"]
+    ]
+    loss_grad_norms_over_epochs_plot(raw_grad_norms, "Per-task raw gradient norm", norm_kind="Raw")
+    saving_manager.save_new_plots("raw_grad_norms")
+
+    if "cagrad_dual_weights" in saving_manager.saved_data:
+        cagrad_dual_weights_over_epochs_plot(
+            saving_manager.saved_data["cagrad_dual_weights"], task_names,
+            "CAGrad task mix (weights sum to 1)",
+        )
+        saving_manager.save_new_plots("cagrad_dual_weights")
+
+    if "cagrad_task_coeffs" in saving_manager.saved_data:
+        cagrad_task_coeffs_over_epochs_plot(
+            saving_manager.saved_data["cagrad_task_coeffs"], task_names,
+            "CAGrad gradient multiplier per task",
+        )
+        saving_manager.save_new_plots("cagrad_task_coeffs")
+
+    summed_raw_grad = [
+        torch.stack([epoch_grads[key] for key in epoch_grads]).sum(dim=0)
+        for epoch_grads in saving_manager.saved_data["raw_grads"]
+    ]
+    raw_grad_cosine_to_reference_plot(
+        saving_manager.saved_data["raw_grads"], summed_raw_grad, task_names,
+        "Task gradient vs plain (summed) direction",
+    )
+    saving_manager.save_new_plots("raw_vs_plain_cosine_similarity")
+    raw_grad_cosine_to_reference_plot(
+        saving_manager.saved_data["raw_grads"], saving_manager.saved_data["effective_grad"], task_names,
+        "Task gradient vs CAGrad update direction",
+    )
+    saving_manager.save_new_plots("raw_vs_cagrad_cosine_similarity")
 
 
 def build_array_positions(array_centre, offsets, invert_offsets=False):
@@ -44,12 +127,14 @@ def build_listener_position_weights(lstn_pos, y_pos_lo, y_pos_hi, y_neg_lo, y_ne
     """
     Weight each listener by its global y coordinate only: high in [y_pos_lo, y_pos_hi] and
     [y_neg_lo, y_neg_hi], low elsewhere (e.g. centre strip and far lateral positions).
+    A small tolerance keeps linspace endpoints like +/-0.20 m symmetric about the origin.
     """
+    eps = 1e-8
     listener_weights = []
     for listener_pos in lstn_pos:
         y = float(listener_pos[1])
-        in_pos_band = y_pos_lo <= y <= y_pos_hi
-        in_neg_band = y_neg_lo <= y <= y_neg_hi
+        in_pos_band = (y_pos_lo - eps) <= y <= (y_pos_hi + eps)
+        in_neg_band = (y_neg_lo - eps) <= y <= (y_neg_hi + eps)
         listener_weights.append(w_high if (in_pos_band or in_neg_band) else w_low)
     return np.asarray(listener_weights, dtype=np.float32)
 
@@ -69,7 +154,8 @@ def make_listener_weighted_loss(listener_weights, device, dtype, pointwise="squa
             error = (estimates - targets).abs()
         else:
             error = (estimates - targets) ** 2
-        return torch.sum(error * weights) / weight_sum
+        # Mean over signals, weighted mean over listeners (weights broadcast on dim 0).
+        return torch.sum(error * weights, dim=-1).mean() / weight_sum
 
     return criterion
 
@@ -665,292 +751,457 @@ def plot_arrows_with_directivity(
     return fig
 
 
-with open('config/hyperpameters.json', 'r') as f:
-    config = json.load(f)
-mtl_optimizer = "cagrad" #config["training"]["mtl_optimizer"]
-skip_keys = config["saving"]["skip_keys"]
-use_tensorboard = False  # heavy run (51 listeners × 200 epochs)
+def main(model_weights=None):
+    with open('config/hyperpameters.json', 'r') as f:
+        config = json.load(f)
+    set_seed(config["env"]["seed"])
+    # 51-listener Rodenas geometry is too large for an 8GB GPU with Llado/CAGrad;
+    # keep training on CPU like the original script.
+    device = torch.device("cpu")
+    dtype = getattr(torch, config["env"]["dtype"])
+    mtl_optimizer = "cagrad"  # config["training"]["mtl_optimizer"]
+    skip_keys = config["saving"]["skip_keys"]
+    use_tensorboard = False  # heavy run (51 listeners × many bandpass batches)
+    fs = config["env"]["fs"]
+    sofa_path = "data/SOFA/SYMMETRIC_D1_48K_24bit_256tap_FIR_SOFA.sofa"
+    gtfb_path = "data/banks/gtfb_48k.npy"
+    apply_distance_attenuation = config["env"]["apply_distance_attenuation"]
+    if model_weights is None:
+        model_weights = [1.0, 1.0]  # loc (llado), colouration (LSD)
+    else:
+        model_weights = [float(model_weights[0]), float(model_weights[1])]
+    filter_initialisation = {"init_weight": "middle", "fs": fs, "n_bands": 4, "band_mode": "log"}
 
-set_seed(config["env"]["seed"])
+    sofaile = load_sofa(sofa_path)
+    hrirs = get_template_for_llado2025_desena_2020(sofaile, device=device, dtype=dtype)
+    gtfb = load_npy_to_torch(gtfb_path, device=device, dtype=dtype)
+    lag_values = torch.arange(-0.001 * fs, 0.001 * fs + 1, 1, dtype=dtype, device=device) / fs
 
-sofaile = load_sofa("data/SOFA/SYMMETRIC_D1_48K_24bit_256tap_FIR_SOFA.sofa")
-hrirs = get_template_for_llado2025_desena_2020(sofaile)
-gtfb = load_npy_to_torch("data/banks/gtfb_48k.npy")
-lag_values = torch.arange(-0.001*48000, 0.001*48000 + 1, 1, dtype=torch.float32, device=hrirs.device) / 48000
+    speakers_per_array = 2
+    speaker_distance = 2.0
+    speaker_spacing_m = 0.18
+    inner_angle_deg = 30.0
+    # Place all loudspeakers on a circle of radius speaker_distance. Inner pair at
+    # +/- inner_angle_deg; outer pair at the same radius, chord-spaced by speaker_spacing_m.
+    pair_angle_delta_deg = float(np.rad2deg(2.0 * np.arcsin(speaker_spacing_m / (2.0 * speaker_distance))))
+    speaker_angles_deg = np.array([
+        inner_angle_deg,                              # 0: +30 inner
+        -inner_angle_deg,                             # 1: -30 inner
+        inner_angle_deg + pair_angle_delta_deg,       # 2: +outer
+        -inner_angle_deg - pair_angle_delta_deg,      # 3: -outer
+    ], dtype=float)
+    spk_pos = torch.tensor([
+        [speaker_distance * np.cos(np.deg2rad(a)), speaker_distance * np.sin(np.deg2rad(a))]
+        for a in speaker_angles_deg
+    ], dtype=dtype, device=device)
+    # Upper (+y) = indices 0,2; lower (-y) = indices 1,3
+    upper_indices = (0, 2)
+    lower_indices = (1, 3)
+    upper_centre = spk_pos[list(upper_indices)].detach().cpu().numpy().mean(axis=0)
+    lower_centre = spk_pos[list(lower_indices)].detach().cpu().numpy().mean(axis=0)
 
-speakers_per_array = 2
-speaker_distance = 2.5
-speaker_spacing_m = 0.17
-relative_offsets = (np.arange(speakers_per_array, dtype=float) - (speakers_per_array - 1) / 2.0) * speaker_spacing_m
-upper_centre = np.array([speaker_distance * np.cos(np.deg2rad(30.0)), speaker_distance * np.sin(np.deg2rad(30.0))])
-lower_centre = np.array([speaker_distance * np.cos(np.deg2rad(-30.0)), speaker_distance * np.sin(np.deg2rad(-30.0))])
-spk_pos = torch.tensor(
-    build_array_positions(upper_centre, relative_offsets, invert_offsets=False)
-    + build_array_positions(lower_centre, relative_offsets, invert_offsets=True),
-    dtype=torch.float32,
-)
-
-num_lstn_pos = 51
-lstn_pos = torch.tensor([[0.0, float(y)] for y in np.linspace(-1.25, 1.25, num_lstn_pos)], dtype=torch.float32)
-
-d = speaker_distance * np.cos(np.deg2rad(30.0))
-target_angle = 0.0
-target_position = torch.tensor([d, float(np.tan(np.deg2rad(target_angle)) * d)], dtype=torch.float32)
-target_angles = target_angle_for_listeners(lstn_pos, target_position)
-
-listener_weights = build_listener_position_weights(lstn_pos, 0.20, 1.25, -1.25, -0.20, 1.0, 0.0)
-if float(np.sum(listener_weights)) <= 0.0:
-    listener_weights = np.ones(len(lstn_pos), dtype=np.float32)
-
-llado_model = llado2025_grad_surgery(48000, hrirs, gtfb)
-lsd_model = LSD(48000, sofaile, target_angles.unsqueeze(-1))
-
-prop = BinauralFreeFieldPropagation(48000, lstn_pos, spk_pos, sofaile, apply_distance_attenuation=True)
-
-n_sources = len(spk_pos)
-n_taps = 40
-nn = MultiSourceFIR(n_taps, n_sources)
-nn.set_filter_initialisation("middle")
-for local_idx in range(speakers_per_array):
-    nn.branches[speakers_per_array + local_idx] = nn.branches[local_idx]
-second_moment = SecondMoment(n_taps, n_sources)
-
-modelTrainer = ModelTrainer(
-    [
-        llado_model,
-        lsd_model
-    ],
-    criterions=[
-        make_listener_weighted_loss(listener_weights, 'cpu', torch.float32, pointwise="squared"),
-        make_listener_weighted_loss(listener_weights, 'cpu', torch.float32, pointwise="squared"),
-    ],
-    weights=[
-        1.0, 
-        0.1
-    ],
-)
-
-targets = {
-    "llado2025_grad_surgery": target_angles.unsqueeze(0),
-    "LSD": torch.zeros(1, len(lstn_pos))
-}
-
-stim = generate_low_pass_stimulus(cutoff_hz=1000, fs=48000, length=512, device='cpu', dtype=torch.float32)
-# stim = torch.ones(1,1,1)
-
-optimizer = torch.optim.Adam(nn.parameters(), lr=0.1)
-mtl = create_mtl_optimizer(modelTrainer, mtl_optimizer)
-
-saving_manager = SavingManager(
-    f"outputs/rodenas/{mtl_optimizer}", skip_keys=skip_keys, timestamp=True, use_tensorboard=use_tensorboard,
-    task_names=list(modelTrainer.model_dict.keys()),
-)
-
-git_info = git_commit_info()
-run_config = {
-    "script": "scripts/rodenas_optimisation.py",
-    "git": git_info,
-    "config": config,
-    "mtl_optimizer": mtl_optimizer,
-    "sofa_path": "data/SOFA/SYMMETRIC_D1_48K_24bit_256tap_FIR_SOFA.sofa",
-    "gtfb_path": "data/banks/gtfb_48k.npy",
-    "apply_distance_attenuation": True,
-    "fs": 48000,
-    "n_taps": n_taps,
-    "n_sources": n_sources,
-    "speakers_per_array": speakers_per_array,
-    "speaker_distance": speaker_distance,
-    "speaker_spacing_m": speaker_spacing_m,
-    "num_lstn_pos": num_lstn_pos,
-    "target_angle": target_angle,
-    "model_weights": [1.0, 0.1],
-    "optimizer": "Adam",
-    "lr": 0.1,
-    "filter_initialisation": "middle",
-    "stimulus": {"type": "low_pass", "cutoff_hz": 1000, "fs": 48000, "length": 512},
-}
-write_run_config(saving_manager.output_dir, run_config)
-saving_manager.save("run_config", run_config)
-saving_manager.save("git_commit", git_info["commit"])
-saving_manager.save("git_dirty", git_info["dirty"])
-saving_manager.save("gtfb", gtfb)
-saving_manager.save("lag_values", lag_values)
-saving_manager.save("tau_iacc", 1e-2)
-saving_manager.save("target_angle", target_angle)
-saving_manager.save("target_position", target_position)
-saving_manager.save("lstn_pos", lstn_pos)
-saving_manager.save("spk_pos", spk_pos)
-saving_manager.save("sofaile", sofaile)
-saving_manager.save("listener_weights", listener_weights)
-
-dummy_input = torch.ones(1,1)
-
-with torch.no_grad():
-    spk_filters = nn(dummy_input)
-    binaural_signals = prop(stim, spk_filters)
-    modelTrainer.compute_estimates(binaural_signals, spk_filters, stim)
-    initial_localisation = modelTrainer.estimates["llado2025_grad_surgery"].squeeze(0).detach().cpu().numpy()
-    binaural_signals_flat = binaural_signals.view(
-        binaural_signals.shape[0] * binaural_signals.shape[1], 2, -1
-    )
-    initial_lsd = lsd_model(binaural_signals_flat, stim)["output"].squeeze(0).detach().cpu().numpy()
-
-for i in range(200):
-
-    saving_manager.set_step(i)
-    spk_filters = nn(dummy_input)
-
-    binaural_signals = prop(stim, spk_filters)
-
-    modelTrainer.compute_estimates(binaural_signals, spk_filters, stim)
-    loss_dict = modelTrainer.compute_loss(targets)
-    saving_manager.save("loss_dict", {key: value.detach() for key, value in loss_dict.items()})
-    saving_manager.save(
-        "modelTrainer.estimates",
-        {key: value.detach() for key, value in modelTrainer.estimates.items()},
+    num_lstn_pos = 51
+    lstn_pos = torch.tensor(
+        [[0.0, float(y)] for y in np.linspace(-1.25, 1.25, num_lstn_pos)],
+        dtype=dtype, device=device,
     )
 
-    for model_name, kwargs in modelTrainer.kwargs_output.items():
-        if "interauralcues" in kwargs:
-            cues = kwargs["interauralcues"]
-            saving_manager.save(f"{model_name}_cues", {"itd": cues["itd"].detach(), "ild": cues["ild"].detach()})
-
-    optimizer.zero_grad()
-    run_mtl_optimizer_step(mtl_optimizer, mtl, loss_dict, nn, optimizer, saving_manager, modelTrainer)
-
-    saving_manager.flush_tensorboard()
-    print_loss_and_estimates(loss_dict, modelTrainer.estimates, i)
-
-with torch.no_grad():
-    spk_filters = nn(dummy_input)
-    binaural_signals = prop(stim, spk_filters)
-    binaural_signals = binaural_signals.view(
-        binaural_signals.shape[0] * binaural_signals.shape[1], 2, -1
+    d = speaker_distance * np.cos(np.deg2rad(inner_angle_deg))
+    target_angle = config["training"]["target_angle"]
+    target_position = torch.tensor(
+        [d, float(np.tan(np.deg2rad(target_angle)) * d)],
+        dtype=dtype, device=device,
     )
-    localisation_angles = llado_model(binaural_signals, stim)["output"]
-    lsd = lsd_model(binaural_signals, stim)["output"]
+    target_angles = target_angle_for_listeners(lstn_pos, target_position)
 
-saving_manager.save("binaural_signals", binaural_signals)
-saving_manager.save("localisation_angles", localisation_angles)
-saving_manager.save("lsd", lsd)
-saving_manager.save("spk_filters", spk_filters)
+    listener_weights = build_listener_position_weights(lstn_pos, 0.20, 1.25, -1.25, -0.20, 1.0, 0.0)
+    if float(np.sum(listener_weights)) <= 0.0:
+        listener_weights = np.ones(len(lstn_pos), dtype=np.float32)
 
-saving_manager.export_to_disk()
-print(f"Saved outputs to {saving_manager.output_dir}")
+    llado_model = llado2025_grad_surgery(fs, hrirs, gtfb, device=device, dtype=dtype)
+    lsd_model = LSD(fs, sofaile, target_angles.unsqueeze(-1), device=device, dtype=dtype)
 
-est_filters = spk_filters.squeeze(0).detach().cpu().numpy()
-est_filters /= np.max(np.abs(est_filters)) / 0.9
-est_filters = est_filters * 1.41
-loc_np = localisation_angles.squeeze(0).detach().cpu().numpy()
-lsd_np = lsd.squeeze(0).detach().cpu().numpy()
+    prop = BinauralFreeFieldPropagation(
+        fs, lstn_pos, spk_pos, sofaile,
+        apply_distance_attenuation=apply_distance_attenuation,
+        device=device, dtype=dtype,
+    )
 
-time_domain_filters_plot(est_filters, fs=48000)
-saving_manager.save_new_plots("time_domain_filters")
-frequency_domain_filters_plot(est_filters, fs=48000)
-saving_manager.save_new_plots("frequency_domain_filters")
-localisation_arrows_plot(
-    lstn_pos, spk_pos, loc_np,
-    np.zeros_like(loc_np), lsd_np,
-    target_angle=target_angles.detach().cpu().numpy(),
-)
-saving_manager.save_new_plots("localisation_arrows")
+    n_sources = len(spk_pos)
+    n_taps = config["filter_estimator"]["n_samples"]
+    nn = MultiSourceFIR(n_taps, n_sources)
+    nn.set_filter_initialisation(**filter_initialisation)
+    # Tie symmetric pairs: +30 with -30 (0↔1), +outer with -outer (2↔3).
+    nn.branches[1] = nn.branches[0]
+    nn.branches[3] = nn.branches[2]
+    nn = nn.to(device=device, dtype=dtype)
+    second_moment = SecondMoment(n_taps, n_sources, device=device, dtype=dtype)
 
-fig_listener_weights, ax_listener_weights = plt.subplots(figsize=(6, 3))
-ax_listener_weights.plot(lstn_pos[:, 1].numpy(), listener_weights, linewidth=2)
-ax_listener_weights.set_xlabel("Listener position y (m)")
-ax_listener_weights.set_ylabel("Listener weight")
-ax_listener_weights.set_title("Listener-position weights")
-ax_listener_weights.grid(True, alpha=0.25)
-saving_manager.save_new_plots("listener_weights")
+    modelTrainer = ModelTrainer(
+        [llado_model, lsd_model],
+        criterions=[
+            make_listener_weighted_loss(listener_weights, device, dtype, pointwise="squared"),
+            make_listener_weighted_loss(listener_weights, device, dtype, pointwise="squared"),
+        ],
+        weights=model_weights,
+    )
 
-rodenas2003_fig12_opt = np.loadtxt(ROOT / "data" / "miscellaneous" / "rodenas2003_fig12_opt.csv", delimiter=",", skiprows=1)
-rodenas2003_fig12_opt = [[-((angle_deg + 180) % 360.0), level_db] for angle_deg, level_db in rodenas2003_fig12_opt]
-rodenas2003_fig12_1000Hz = np.loadtxt(ROOT / "data" / "miscellaneous" / "rodenas2003_fig12_1000Hz.csv", delimiter=",", skiprows=1)
-rodenas2003_fig12_1000Hz = [[-((angle_deg + 180) % 360.0), level_db] for angle_deg, level_db in rodenas2003_fig12_1000Hz]
+    targets = {
+        "llado2025_grad_surgery": target_angles.unsqueeze(0),
+        "LSD": torch.zeros(1, len(lstn_pos), dtype=dtype, device=device),
+    }
 
-right_array_indices = tuple(range(speakers_per_array, 2 * speakers_per_array))
-left_array_indices = tuple(range(speakers_per_array))
+    # Keep bandpass multi-band coverage, but fewer draws per band for CPU wall-time
+    # (51 listeners forces batch_size=1).
+    rodenas_batch_size = 1
+    n_bands = config["stimulus_dataset"]["n_bands"]
+    n_samples_per_band = 4
+    stimulus_dataset_run = {
+        **config["stimulus_dataset"],
+        "n_samples_per_band": n_samples_per_band,
+    }
 
-loc_metrics = localisation_error_metrics(
-    target_angles=target_angles.detach().cpu().numpy(),
-    loc_before=initial_localisation,
-    loc_after=loc_np,
-    listener_weights=listener_weights,
-)
-col_w = np.asarray(listener_weights, dtype=float).ravel()
-col_sum_w = float(np.sum(col_w))
-col_metrics = {
-    "mean_before_db": float(np.mean(initial_lsd)),
-    "mean_after_db": float(np.mean(lsd_np)),
-    "weighted_mean_before_db": float(np.sum(col_w * initial_lsd) / col_sum_w) if col_sum_w > 0 else float(np.mean(initial_lsd)),
-    "weighted_mean_after_db": float(np.sum(col_w * lsd_np) / col_sum_w) if col_sum_w > 0 else float(np.mean(lsd_np)),
-}
-dir_theta, dir_avg_db, dir_group_mid = compute_group_directivity_db(
-    filters=est_filters, spk_pos_np=spk_pos.numpy(), group_indices=right_array_indices,
-    fs=48000, freqs_eval_hz=[250, 500, 1000, 2000, 4000], radius=10.0,
-)
-directivity_metrics = directivity_match_metrics(
-    theta=dir_theta, dir_avg_db=dir_avg_db, group_mid=dir_group_mid,
-    overlay_curves=[rodenas2003_fig12_opt, rodenas2003_fig12_1000Hz],
-    overlay_labels=["rodenas2003 (optimum)", "rodenas2003 (1000 Hz)"],
-)
-analysis = {"localisation": loc_metrics, "colouration": col_metrics, "directivity_match": directivity_metrics}
+    stim_loader, stim_dataset = get_stim_loader(
+        fs=fs,
+        n_bands=n_bands,
+        n_samples_per_band=n_samples_per_band,
+        batch_size=rodenas_batch_size,
+        stimulus_length_ms=config["stimulus_dataset"]["stimulus_length_ms"],
+        ramp_time_ms=config["stimulus_dataset"]["ramp_time_ms"],
+        f_min=config["stimulus_dataset"]["f_min"],
+        f_max=config["stimulus_dataset"]["f_max"],
+        band_mode=config["stimulus_dataset"]["band_mode"],
+        erb_factor=config["stimulus_dataset"].get("erb_factor", 1.0),
+        dataset_type=config["stimulus_dataset"]["dataset_type"],
+        stimulus_type=config["stimulus_dataset"]["stimulus_type"],
+        seed=config["env"]["seed"],
+        shuffle=config["training"]["shuffle"],
+        num_workers=config["training"]["num_workers"],
+        pin_memory=config["training"]["pin_memory"],
+        drop_last=config["training"]["drop_last"],
+    )
+    eval_config = {
+        **config,
+        "stimulus_dataset": stimulus_dataset_run,
+        "training": {**config["training"], "batch_size": 1},
+    }
+    eval_stim = get_white_noise_batch(eval_config, device=device, dtype=dtype, shuffle=False)
 
-print("\n================ Results analysis ================")
-print(f"  Loc MAE  : {loc_metrics['mae_before_deg']:.2f} -> {loc_metrics['mae_after_deg']:.2f}")
-print(f"  Loc RMSE : {loc_metrics['rmse_before_deg']:.2f} -> {loc_metrics['rmse_after_deg']:.2f}")
-print(f"  LSD mean : {col_metrics['mean_before_db']:.2f} -> {col_metrics['mean_after_db']:.2f}")
-for m in directivity_metrics:
-    print(f"  {m['label']}: RMSE {m['rmse_db']:.2f} dB, MAE {m['mae_db']:.2f} dB")
-print("==================================================\n")
+    optimizer = torch.optim.Adam(nn.parameters(), lr=config["training"]["lr"])
+    mtl = create_mtl_optimizer(modelTrainer, mtl_optimizer, training_config=config["training"])
 
-with open(saving_manager.output_dir / "analysis.json", "w") as f:
-    json.dump(analysis, f, indent=4)
+    saving_manager = SavingManager(
+        f"outputs/rodenas/{mtl_optimizer}", skip_keys=skip_keys, timestamp=True, use_tensorboard=use_tensorboard,
+        task_names=list(modelTrainer.model_dict.keys()),
+    )
 
-plot_pair_directivity_polar(
-    est_filters=est_filters, spk_pos=spk_pos.numpy(), fs=48000,
-    group_indices=right_array_indices, radius=10.0,
-    freqs_eval_hz=[250, 500, 1000, 2000, 4000],
-    overlay_curves=[rodenas2003_fig12_opt, rodenas2003_fig12_1000Hz],
-    overlay_labels=["rodenas2003 (opt.)", "rodenas2003 (1 kHz)"],
-    db_floor=-40, show=False,
-)
-saving_manager.save_new_plots("directivity_polar")
+    git_info = git_commit_info()
+    run_config = {
+        "script": "scripts/rodenas_optimisation.py",
+        "git": git_info,
+        "config": config,
+        "env": {
+            "fs": fs,
+            "device": str(device),
+            "dtype": config["env"]["dtype"],
+            "seed": config["env"]["seed"],
+            "sofa_path": sofa_path,
+            "gtfb_path": gtfb_path,
+            "apply_distance_attenuation": apply_distance_attenuation,
+        },
+        "mtl_optimizer": mtl_optimizer,
+        "n_taps": n_taps,
+        "n_sources": n_sources,
+        "speakers_per_array": speakers_per_array,
+        "speaker_distance": speaker_distance,
+        "speaker_spacing_m": speaker_spacing_m,
+        "inner_angle_deg": inner_angle_deg,
+        "pair_angle_delta_deg": pair_angle_delta_deg,
+        "speaker_angles_deg": speaker_angles_deg.tolist(),
+        "upper_indices": list(upper_indices),
+        "lower_indices": list(lower_indices),
+        "num_lstn_pos": num_lstn_pos,
+        "target_angle": target_angle,
+        "model_weights": model_weights,
+        "optimizer": "Adam",
+        "lr": config["training"]["lr"],
+        "num_epochs": config["training"]["num_epochs"],
+        "batch_size": rodenas_batch_size,
+        "cagrad_c": config["training"].get("cagrad_c"),
+        "filter_initialisation": filter_initialisation,
+        "stimulus_dataset": stimulus_dataset_run,
+    }
+    write_run_config(saving_manager.output_dir, run_config)
+    saving_manager.save("run_config", run_config)
+    saving_manager.save("git_commit", git_info["commit"])
+    saving_manager.save("git_dirty", git_info["dirty"])
+    saving_manager.save("gtfb", gtfb)
+    saving_manager.save("lag_values", lag_values)
+    saving_manager.save("tau_iacc", 1e-2)
+    saving_manager.save("target_angle", target_angle)
+    saving_manager.save("target_position", target_position)
+    saving_manager.save("target_angles", target_angles)
+    saving_manager.save("lstn_pos", lstn_pos)
+    saving_manager.save("spk_pos", spk_pos)
+    saving_manager.save("sofaile", sofaile)
+    saving_manager.save("listener_weights", listener_weights)
+    saving_manager.save("stimulus_dataset", stimulus_dataset_run)
+    saving_manager.save("filter_initialisation", filter_initialisation)
+    saving_manager.save("mtl_optimizer", mtl_optimizer)
+    saving_manager.save("model_weights", model_weights)
+    saving_manager.save("lr", config["training"]["lr"])
+    saving_manager.save("num_epochs", config["training"]["num_epochs"])
+    saving_manager.save("batch_size", rodenas_batch_size)
+    saving_manager.save("n_taps", n_taps)
+    saving_manager.save("n_sources", n_sources)
+    saving_manager.save("fs", fs)
+    saving_manager.save("device", str(device))
+    saving_manager.save("dtype", config["env"]["dtype"])
+    saving_manager.save("seed", config["env"]["seed"])
 
-plot_arrows_with_directivity(
-    est_filters=est_filters, spk_pos=spk_pos, lstn_pos=lstn_pos,
-    loc=torch.as_tensor(loc_np), fs=48000,
-    group_idx=[left_array_indices, right_array_indices],
-    target_pos=target_position, show_listener_target_lines=True, show=False,
-    freqs_eval_hz=[250, 500, 1000, 2000, 4000],
-    directivity_observation_radius_m=10.0, directivity_mode="avg",
-    directivity_scale=0.8, directivity_floor_db=-20,
-    overlay_curves=[rodenas2003_fig12_opt, rodenas2003_fig12_1000Hz],
-    overlay_labels=["rodenas2003 (optimum)", "rodenas2003 (1000 Hz)"],
-    legend_bbox_to_anchor=(0.28, 1.02), figsize=(5, 5),
-)
-saving_manager.save_new_plots("arrows_and_directivity")
+    dummy_input = torch.ones(1, 1, dtype=dtype, device=device)
+    n_listeners = len(lstn_pos)
 
-est_filters_centre = np.stack([np.sum(est_filters[0:speakers_per_array], axis=0),
-                               np.sum(est_filters[speakers_per_array:], axis=0)], axis=0)
-spk_pos_centre = np.stack([upper_centre, lower_centre], axis=0)
-prop_centre = BinauralFreeFieldPropagation(48000, lstn_pos, torch.as_tensor(spk_pos_centre, dtype=torch.float32), sofaile, apply_distance_attenuation=True)
-with torch.no_grad():
-    h_centre = torch.as_tensor(est_filters_centre, dtype=torch.float32).unsqueeze(0)
-    bin_stim_centre = prop_centre(stim, h_centre)
-    bin_stim_centre = bin_stim_centre.view(bin_stim_centre.shape[0] * bin_stim_centre.shape[1], 2, -1)
-    loc_centre = llado_model(bin_stim_centre, stim)["output"].squeeze(0)
+    with torch.no_grad():
+        spk_filters = nn(dummy_input)
+        binaural_signals = prop(eval_stim, spk_filters)
+        modelTrainer.compute_estimates(binaural_signals, spk_filters, eval_stim)
+        initial_localisation = modelTrainer.estimates["llado2025_grad_surgery"].mean(dim=0).detach().cpu().numpy()
+        binaural_signals_flat = binaural_signals.view(
+            binaural_signals.shape[0] * binaural_signals.shape[1], 2, -1
+        )
+        initial_lsd = (
+            lsd_model(binaural_signals_flat, eval_stim)["output"]
+            .view(eval_stim.shape[0], n_listeners)
+            .mean(dim=0)
+            .detach()
+            .cpu()
+            .numpy()
+        )
 
-plot_arrows_with_directivity(
-    est_filters=est_filters_centre,
-    spk_pos=torch.as_tensor(spk_pos_centre, dtype=torch.float32),
-    lstn_pos=lstn_pos, loc=loc_centre, fs=48000,
-    group_idx=[(0,), (1,)], show=False,
-    freqs_eval_hz=[250, 500, 1000, 2000, 4000],
-    directivity_observation_radius_m=10.0, directivity_mode="avg",
-    directivity_scale=0.8, directivity_floor_db=-20,
-    directivity_label="Omni source", legend_ncol=1, figsize=(5, 5),
-)
-saving_manager.save_new_plots("arrows_and_directivity_centre")
+    print(
+        f"Starting Rodenas CAGrad training on {device}: "
+        f"{config['training']['num_epochs']} epochs, batch_size={rodenas_batch_size}, "
+        f"n_listeners={n_listeners}, n_taps={n_taps}, weights={model_weights}, "
+        f"bands={n_bands}x{n_samples_per_band}, "
+        f"spk_angles_deg={np.round(speaker_angles_deg, 2).tolist()}",
+        flush=True,
+    )
+    for epoch in range(config["training"]["num_epochs"]):
+        batch_loss_dicts = []
+        batch_estimates = []
+        batch_cues = {}
+        batch_mtl_saved = []
 
-saving_manager.close()
+        for batch_idx, stim in enumerate(stim_loader):
+            if batch_idx % 32 == 0:
+                print(f"  epoch {epoch} batch {batch_idx}/{len(stim_loader)}", flush=True)
+            stim = stim.to(device=device, dtype=dtype)
+            spk_filters = nn(dummy_input)
+            binaural_signals = prop(stim, spk_filters)
+
+            modelTrainer.compute_estimates(binaural_signals, spk_filters, stim)
+            loss_dict = modelTrainer.compute_loss(targets)
+            batch_loss_dicts.append({key: value.detach() for key, value in loss_dict.items()})
+            batch_estimates.append(
+                {key: value.detach() for key, value in modelTrainer.estimates.items()}
+            )
+
+            for model_name, kwargs in modelTrainer.kwargs_output.items():
+                if "interauralcues" in kwargs:
+                    cues = kwargs["interauralcues"]
+                    batch_cues.setdefault(model_name, []).append(
+                        {"itd": cues["itd"].detach(), "ild": cues["ild"].detach()}
+                    )
+
+            optimizer.zero_grad()
+            batch_mtl_saved.append(
+                run_mtl_optimizer_step(
+                    mtl_optimizer, mtl, loss_dict, nn, optimizer, saving_manager, modelTrainer, save=False
+                )
+            )
+
+        saving_manager.set_step(epoch)
+        epoch_loss_dict = average_loss_dicts(batch_loss_dicts)
+        epoch_estimates = average_estimates_dicts(batch_estimates)
+        saving_manager.save("loss_dict", epoch_loss_dict)
+        saving_manager.save("modelTrainer.estimates", epoch_estimates)
+        for model_name, cues_dicts in batch_cues.items():
+            saving_manager.save(
+                f"{model_name}_cues", average_interaural_cues_dicts(cues_dicts, n_listeners)
+            )
+        for key, value in average_mtl_saved_values(batch_mtl_saved).items():
+            saving_manager.save(key, value)
+
+        saving_manager.flush_tensorboard()
+        print_loss_and_estimates(epoch_loss_dict, epoch_estimates, epoch)
+
+    with torch.no_grad():
+        spk_filters = nn(dummy_input)
+        binaural_signals = prop(eval_stim, spk_filters)
+        binaural_signals = binaural_signals.view(
+            binaural_signals.shape[0] * binaural_signals.shape[1], 2, -1
+        )
+        localisation_angles = (
+            llado_model(binaural_signals, eval_stim)["output"]
+            .view(eval_stim.shape[0], n_listeners)
+            .mean(dim=0, keepdim=True)
+        )
+        lsd = (
+            lsd_model(binaural_signals, eval_stim)["output"]
+            .view(eval_stim.shape[0], n_listeners)
+            .mean(dim=0, keepdim=True)
+        )
+
+    saving_manager.save("binaural_signals", binaural_signals)
+    saving_manager.save("localisation_angles", localisation_angles)
+    saving_manager.save("lsd", lsd)
+    saving_manager.save("spk_filters", spk_filters)
+
+    saving_manager.export_to_disk()
+    print(f"Saved outputs to {saving_manager.output_dir}")
+
+    est_filters = spk_filters.squeeze(0).detach().cpu().numpy()
+    est_filters /= np.max(np.abs(est_filters)) / 0.9
+    est_filters = est_filters * 1.41
+    loc_np = localisation_angles.squeeze(0).detach().cpu().numpy()
+    lsd_np = lsd.squeeze(0).detach().cpu().numpy()
+    lstn_pos_np = lstn_pos.detach().cpu().numpy()
+    spk_pos_np = spk_pos.detach().cpu().numpy()
+
+    time_domain_filters_plot(est_filters, fs=fs)
+    saving_manager.save_new_plots("time_domain_filters")
+    frequency_domain_filters_plot(est_filters, fs=fs)
+    saving_manager.save_new_plots("frequency_domain_filters")
+    localisation_arrows_plot(
+        lstn_pos, spk_pos, loc_np,
+        np.zeros_like(loc_np), lsd_np,
+        target_angle=target_angles.detach().cpu().numpy(),
+    )
+    saving_manager.save_new_plots("localisation_arrows")
+
+    fig_listener_weights, ax_listener_weights = plt.subplots(figsize=(6, 3))
+    ax_listener_weights.plot(lstn_pos_np[:, 1], listener_weights, linewidth=2)
+    ax_listener_weights.set_xlabel("Listener position y (m)")
+    ax_listener_weights.set_ylabel("Listener weight")
+    ax_listener_weights.set_title("Listener-position weights")
+    ax_listener_weights.grid(True, alpha=0.25)
+    saving_manager.save_new_plots("listener_weights")
+
+    rodenas2003_fig12_opt = np.loadtxt(ROOT / "data" / "miscellaneous" / "rodenas2003_fig12_opt.csv", delimiter=",", skiprows=1)
+    rodenas2003_fig12_opt = [[-((angle_deg + 180) % 360.0), level_db] for angle_deg, level_db in rodenas2003_fig12_opt]
+    rodenas2003_fig12_1000Hz = np.loadtxt(ROOT / "data" / "miscellaneous" / "rodenas2003_fig12_1000Hz.csv", delimiter=",", skiprows=1)
+    rodenas2003_fig12_1000Hz = [[-((angle_deg + 180) % 360.0), level_db] for angle_deg, level_db in rodenas2003_fig12_1000Hz]
+
+    right_array_indices = lower_indices
+    left_array_indices = upper_indices
+
+    loc_metrics = localisation_error_metrics(
+        target_angles=target_angles.detach().cpu().numpy(),
+        loc_before=initial_localisation,
+        loc_after=loc_np,
+        listener_weights=listener_weights,
+    )
+    col_w = np.asarray(listener_weights, dtype=float).ravel()
+    col_sum_w = float(np.sum(col_w))
+    col_metrics = {
+        "mean_before_db": float(np.mean(initial_lsd)),
+        "mean_after_db": float(np.mean(lsd_np)),
+        "weighted_mean_before_db": float(np.sum(col_w * initial_lsd) / col_sum_w) if col_sum_w > 0 else float(np.mean(initial_lsd)),
+        "weighted_mean_after_db": float(np.sum(col_w * lsd_np) / col_sum_w) if col_sum_w > 0 else float(np.mean(lsd_np)),
+    }
+    dir_theta, dir_avg_db, dir_group_mid = compute_group_directivity_db(
+        filters=est_filters, spk_pos_np=spk_pos_np, group_indices=right_array_indices,
+        fs=fs, freqs_eval_hz=[250, 500, 1000, 2000, 4000], radius=10.0,
+    )
+    directivity_metrics = directivity_match_metrics(
+        theta=dir_theta, dir_avg_db=dir_avg_db, group_mid=dir_group_mid,
+        overlay_curves=[rodenas2003_fig12_opt, rodenas2003_fig12_1000Hz],
+        overlay_labels=["rodenas2003 (optimum)", "rodenas2003 (1000 Hz)"],
+    )
+    analysis = {"localisation": loc_metrics, "colouration": col_metrics, "directivity_match": directivity_metrics}
+
+    print("\n================ Results analysis ================")
+    print(f"  Loc MAE  : {loc_metrics['mae_before_deg']:.2f} -> {loc_metrics['mae_after_deg']:.2f}")
+    print(f"  Loc RMSE : {loc_metrics['rmse_before_deg']:.2f} -> {loc_metrics['rmse_after_deg']:.2f}")
+    print(f"  LSD mean : {col_metrics['mean_before_db']:.2f} -> {col_metrics['mean_after_db']:.2f}")
+    for m in directivity_metrics:
+        print(f"  {m['label']}: RMSE {m['rmse_db']:.2f} dB, MAE {m['mae_db']:.2f} dB")
+    print("==================================================\n")
+
+    with open(saving_manager.output_dir / "analysis.json", "w") as f:
+        json.dump(analysis, f, indent=4)
+
+    plot_pair_directivity_polar(
+        est_filters=est_filters, spk_pos=spk_pos_np, fs=fs,
+        group_indices=right_array_indices, radius=10.0,
+        freqs_eval_hz=[250, 500, 1000, 2000, 4000],
+        overlay_curves=[rodenas2003_fig12_opt, rodenas2003_fig12_1000Hz],
+        overlay_labels=["rodenas2003 (opt.)", "rodenas2003 (1 kHz)"],
+        db_floor=-40, show=False,
+    )
+    saving_manager.save_new_plots("directivity_polar")
+
+    plot_arrows_with_directivity(
+        est_filters=est_filters, spk_pos=spk_pos, lstn_pos=lstn_pos,
+        loc=torch.as_tensor(loc_np), fs=fs,
+        group_idx=[left_array_indices, right_array_indices],
+        target_pos=target_position, show_listener_target_lines=True, show=False,
+        freqs_eval_hz=[250, 500, 1000, 2000, 4000],
+        directivity_observation_radius_m=10.0, directivity_mode="avg",
+        directivity_scale=0.8, directivity_floor_db=-20,
+        overlay_curves=[rodenas2003_fig12_opt, rodenas2003_fig12_1000Hz],
+        overlay_labels=["rodenas2003 (optimum)", "rodenas2003 (1000 Hz)"],
+        legend_bbox_to_anchor=(0.28, 1.02), figsize=(5, 5),
+    )
+    saving_manager.save_new_plots("arrows_and_directivity")
+
+    est_filters_centre = np.stack([
+        np.sum(est_filters[list(upper_indices)], axis=0),
+        np.sum(est_filters[list(lower_indices)], axis=0),
+    ], axis=0)
+    spk_pos_centre = np.stack([upper_centre, lower_centre], axis=0)
+    prop_centre = BinauralFreeFieldPropagation(
+        fs, lstn_pos, torch.as_tensor(spk_pos_centre, dtype=dtype, device=device), sofaile,
+        apply_distance_attenuation=apply_distance_attenuation, device=device, dtype=dtype,
+    )
+    with torch.no_grad():
+        h_centre = torch.as_tensor(est_filters_centre, dtype=dtype, device=device).unsqueeze(0)
+        bin_stim_centre = prop_centre(eval_stim, h_centre)
+        bin_stim_centre = bin_stim_centre.view(bin_stim_centre.shape[0] * bin_stim_centre.shape[1], 2, -1)
+        loc_centre = (
+            llado_model(bin_stim_centre, eval_stim)["output"]
+            .view(eval_stim.shape[0], n_listeners)
+            .mean(dim=0)
+        )
+
+    plot_arrows_with_directivity(
+        est_filters=est_filters_centre,
+        spk_pos=torch.as_tensor(spk_pos_centre, dtype=dtype),
+        lstn_pos=lstn_pos.detach().cpu(), loc=loc_centre.detach().cpu(), fs=fs,
+        group_idx=[(0,), (1,)], show=False,
+        freqs_eval_hz=[250, 500, 1000, 2000, 4000],
+        directivity_observation_radius_m=10.0, directivity_mode="avg",
+        directivity_scale=0.8, directivity_floor_db=-20,
+        directivity_label="Omni source", legend_ncol=1, figsize=(5, 5),
+    )
+    saving_manager.save_new_plots("arrows_and_directivity_centre")
+
+    plot_rodenas_mtl_diagnostics(saving_manager)
+
+    saving_manager.close()
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Rodenas bandpass CAGrad optimisation")
+    parser.add_argument(
+        "--weights",
+        type=float,
+        nargs=2,
+        metavar=("LOC", "COL"),
+        default=None,
+        help="Task weights for localisation (llado) and colouration (LSD). Default: 1 1",
+    )
+    args = parser.parse_args()
+    main(model_weights=args.weights)
