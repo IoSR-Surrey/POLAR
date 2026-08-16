@@ -1,4 +1,5 @@
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -14,6 +15,19 @@ import sounddevice as sd
 import torch
 import torchaudio.functional as TF
 from scipy.io import wavfile
+
+
+def _load_module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+vbap = _load_module(
+    "create_vbap_stimuli",
+    ROOT / "scripts" / "listening" / "create_vbap_stimuli.py",
+)
 
 
 def pink_noise(n, random_state=None):
@@ -113,6 +127,20 @@ def load_spk_pos(output_dir, n_sources):
     return spk_pos
 
 
+def load_target_angle(output_dir):
+    path = output_dir / "json" / "target_angle.json"
+    if not path.exists():
+        return None
+    with open(path, encoding="utf-8") as f:
+        return float(json.load(f))
+
+
+def format_angle_deg(angle):
+    if angle is None:
+        return "unknown"
+    return f"{angle:g}°"
+
+
 def setup_description(n_sources, spk_pos=None):
     if n_sources == 2:
         return "2 speakers (stereo)"
@@ -165,6 +193,7 @@ def load_filter_sets(output_dirs):
         n_sources, n_taps = spk_filters.shape
         validate_n_sources(n_sources)
         spk_pos = load_spk_pos(output_dir, n_sources)
+        target_angle = load_target_angle(output_dir)
         try:
             label = str(output_dir.relative_to(ROOT))
         except ValueError:
@@ -174,9 +203,13 @@ def load_filter_sets(output_dirs):
             "spk_filters": spk_filters,
             "spk_pos": spk_pos,
             "n_sources": n_sources,
+            "target_angle": target_angle,
         })
         setup = setup_description(n_sources, spk_pos)
-        print(f"Loaded spk_filters from {output_dir}: {n_sources} speakers, {n_taps} taps ({setup})")
+        print(
+            f"Loaded spk_filters from {output_dir}: {n_sources} speakers, {n_taps} taps "
+            f"({setup}), target {format_angle_deg(target_angle)}"
+        )
         if spk_pos is not None:
             for i, pos in enumerate(spk_pos):
                 print(f"  spk {i}: ({pos[0]:.3f}, {pos[1]:.3f})")
@@ -216,6 +249,15 @@ def apply_spk_filters(stimulus, spk_filters):
         channels.append(filtered.squeeze().numpy())
     min_len = min(len(ch) for ch in channels)
     return np.stack([ch[:min_len] for ch in channels], axis=1)
+
+
+def apply_vbap(stimulus, spk_pos, target_angle):
+    gains = vbap.vbap_gains_2d(spk_pos, target_angle)
+    return vbap.apply_vbap_gains(stimulus, gains)
+
+
+def vbap_available(filter_set):
+    return filter_set["spk_pos"] is not None and filter_set["target_angle"] is not None
 
 
 def route_channels(audio, channel_map):
@@ -348,16 +390,33 @@ def run_playback_loop(playlist, filter_sets, fs, device_index, channel_map_arg):
     device_name = devices[device_index]["name"]
 
     pygame.init()
-    screen = pygame.display.set_mode((760, 420))
+    screen = pygame.display.set_mode((760, 460))
     pygame.display.set_caption("Filtered playback")
     font = pygame.font.SysFont(None, 28)
 
     folder_idx = 0
     source_idx = 0
+    vbap_mode = False
     channel_map = effective_channel_map(channel_map_arg, filter_sets[folder_idx]["n_sources"])
 
     def filtered_audio():
         return apply_spk_filters(playlist[source_idx][1], filter_sets[folder_idx]["spk_filters"])
+
+    def vbap_audio():
+        filter_set = filter_sets[folder_idx]
+        return apply_vbap(playlist[source_idx][1], filter_set["spk_pos"], filter_set["target_angle"])
+
+    def current_logical_audio():
+        if vbap_mode:
+            return vbap_audio()
+        return filtered_audio()
+
+    def push_audio(*, restart=False):
+        audio = prepare_playback_audio(current_logical_audio(), channel_map)
+        if restart or audio.shape[1] != player.audio.shape[1]:
+            player.restart(audio, channel_map)
+        else:
+            player.set_audio(audio)
 
     player = LoopPlayer(prepare_playback_audio(filtered_audio(), channel_map), fs, device_index, channel_map)
     player.start()
@@ -365,13 +424,33 @@ def run_playback_loop(playlist, filter_sets, fs, device_index, channel_map_arg):
     def select_source(new_idx):
         nonlocal source_idx
         source_idx = new_idx % len(playlist)
-        player.set_audio(prepare_playback_audio(filtered_audio(), channel_map))
+        push_audio()
 
     def select_folder(new_idx):
-        nonlocal folder_idx, channel_map
+        nonlocal folder_idx, channel_map, vbap_mode
         folder_idx = new_idx % len(filter_sets)
         channel_map = effective_channel_map(channel_map_arg, filter_sets[folder_idx]["n_sources"])
-        player.restart(prepare_playback_audio(filtered_audio(), channel_map), channel_map)
+        if vbap_mode and not vbap_available(filter_sets[folder_idx]):
+            print("VBAP unavailable for this folder; switching back to filters.")
+            vbap_mode = False
+        push_audio(restart=True)
+
+    def toggle_vbap():
+        nonlocal vbap_mode
+        if not vbap_mode:
+            filter_set = filter_sets[folder_idx]
+            if not vbap_available(filter_set):
+                missing = []
+                if filter_set["spk_pos"] is None:
+                    missing.append("spk_pos")
+                if filter_set["target_angle"] is None:
+                    missing.append("target_angle")
+                print(f"Cannot play VBAP: missing {', '.join(missing)} for this folder.")
+                return
+            vbap_mode = True
+        else:
+            vbap_mode = False
+        push_audio()
 
     running = True
     clock = pygame.time.Clock()
@@ -382,8 +461,11 @@ def run_playback_loop(playlist, filter_sets, fs, device_index, channel_map_arg):
         status = "Playing — Space to pause" if player.playing else "Paused — Space to play"
         source_name = playlist[source_idx][0]
         folder_name = filter_set["label"]
+        mode = "VBAP" if vbap_mode else "filters"
+        target = format_angle_deg(filter_set["target_angle"])
         for i, line in enumerate([
             status,
+            f"Mode: {mode}  (V to toggle VBAP)   Target: {target}",
             f"Source: {source_name} ({source_idx + 1}/{len(playlist)})",
             "Up/Down to change source",
             f"Filters: {folder_name} ({folder_idx + 1}/{len(filter_sets)})",
@@ -404,6 +486,8 @@ def run_playback_loop(playlist, filter_sets, fs, device_index, channel_map_arg):
                     running = False
                 elif event.key == pygame.K_SPACE and not getattr(event, "repeat", 0):
                     player.toggle()
+                elif event.key == pygame.K_v and not getattr(event, "repeat", 0):
+                    toggle_vbap()
                 elif event.key == pygame.K_UP and not getattr(event, "repeat", 0):
                     select_source(source_idx + 1)
                 elif event.key == pygame.K_DOWN and not getattr(event, "repeat", 0):
