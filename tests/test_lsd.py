@@ -198,3 +198,16 @@ def test_forward_is_differentiable(single_listener_model: LSD) -> None:
 
     assert binaural_signals.grad is not None
     assert torch.any(binaural_signals.grad != 0.0)
+
+
+def test_long_signals_use_fft_length_at_least_sig_len(single_listener_model: LSD) -> None:
+    sig_len = N_FFT + 500
+    binaural_a = torch.zeros(1, 2, sig_len)
+    binaural_b = torch.zeros(1, 2, sig_len)
+    binaural_a[..., -16:] = 1.0
+
+    same = single_listener_model.log_spectral_distortion(binaural_a, binaural_a)
+    diff = single_listener_model.log_spectral_distortion(binaural_a, binaural_b)
+
+    assert same.item() == pytest.approx(0.0, abs=1e-5)
+    assert diff.item() > 0.0
