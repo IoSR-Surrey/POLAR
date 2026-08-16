@@ -126,16 +126,28 @@ def load_multichannel_wav(path, target_fs):
     return audio
 
 
-# Keep in sync with create_localisation_stimuli.DEFAULT_TARGET_RMS.
-DEFAULT_TARGET_RMS = 0.02484308
+# Keep in sync with create_localisation_stimuli.DEFAULT_TARGET_LUFS.
+DEFAULT_TARGET_LUFS = -30.0
+DEFAULT_MAX_PEAK = 0.99
 
 
-def normalize_for_playback(audio, target_rms=DEFAULT_TARGET_RMS):
-    """Scale so the global RMS equals target_rms, preserving inter-channel level."""
+def normalize_for_playback(audio, fs, target_lufs=DEFAULT_TARGET_LUFS, max_peak=DEFAULT_MAX_PEAK):
+    """Scale to target integrated LUFS, preserving inter-channel level."""
+    import pyloudnorm as pyln
+
     audio = np.asarray(audio, dtype=np.float64)
-    rms = float(np.sqrt(np.mean(audio ** 2)))
-    if rms > 0:
-        audio = audio * (target_rms / rms)
+    if audio.size == 0:
+        return audio.astype(np.float32)
+    data = audio.reshape(-1, 1) if audio.ndim == 1 else audio
+    meter = pyln.Meter(int(fs))
+    loudness = float(meter.integrated_loudness(data))
+    if not np.isfinite(loudness):
+        raise ValueError(f"Could not measure integrated loudness (got {loudness}).")
+    gain = 10.0 ** ((float(target_lufs) - loudness) / 20.0)
+    audio = audio * gain
+    peak = float(np.max(np.abs(audio)))
+    if peak > max_peak and peak > 0.0:
+        audio = audio * (max_peak / peak)
     return audio.astype(np.float32)
 
 
@@ -661,7 +673,9 @@ def run_trial_loop(screen, font, small_font, stimuli, session, fs, device_index)
     completed = True
 
     for trial_index, stimulus in enumerate(stimuli):
-        audio = normalize_for_playback(stimulus["audio"], target_rms=session["rms"])
+        audio = normalize_for_playback(
+            stimulus["audio"], fs, target_lufs=session["lufs"]
+        )
         if player is not None:
             player.stop()
         player = LoopPlayer(audio, fs, device_index)
@@ -804,7 +818,7 @@ def run_gui(args, fs):
         "seat": setup["seat"].strip(),
         "participant": setup["participant"].strip(),
         "results_path": Path(setup["results_path"]),
-        "rms": args.rms,
+        "lufs": args.lufs,
     }
 
     completed = run_trial_loop(screen, font, small_font, stimuli, session, fs, device_index)
@@ -860,8 +874,8 @@ def parse_args():
         help="Playback sample rate in Hz. Defaults to config/hyperpameters.json env.fs.",
     )
     parser.add_argument(
-        "--rms", type=float, default=DEFAULT_TARGET_RMS,
-        help="Target RMS after normalisation.",
+        "--lufs", type=float, default=DEFAULT_TARGET_LUFS,
+        help="Target integrated loudness in LUFS after normalisation (default: -30).",
     )
     parser.add_argument("--seed", type=int, default=None, help="Seed for trial-order shuffling.")
     parser.add_argument(

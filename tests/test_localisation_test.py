@@ -169,12 +169,17 @@ def test_azimuth_screen_roundtrip() -> None:
 # --------------------------------------------------------------------------- #
 # Audio helpers
 # --------------------------------------------------------------------------- #
-def test_normalize_for_playback_hits_target_rms() -> None:
-    audio = np.array([[0.1, -0.2], [0.05, 0.3]], dtype=np.float64)
-    out = lt.normalize_for_playback(audio, target_rms=0.1)
-    assert np.sqrt(np.mean(out ** 2)) == pytest.approx(0.1, abs=1e-6)
+def test_normalize_for_playback_hits_target_lufs() -> None:
+    pytest.importorskip("pyloudnorm")
+    fs = 48000
+    rng = np.random.default_rng(1)
+    audio = rng.standard_normal((fs * 3, 2)) * 0.05
+    out = lt.normalize_for_playback(audio, fs, target_lufs=-30.0)
+    import pyloudnorm as pyln
+    measured = pyln.Meter(fs).integrated_loudness(out.astype(np.float64))
+    assert measured == pytest.approx(-30.0, abs=0.15)
     # Inter-channel ratio preserved.
-    assert out[1, 1] / out[0, 1] == pytest.approx(audio[1, 1] / audio[0, 1], abs=1e-5)
+    assert out[100, 1] / out[100, 0] == pytest.approx(audio[100, 1] / audio[100, 0], abs=1e-5)
 
 
 def test_load_multichannel_wav_preserves_channels(tmp_path) -> None:

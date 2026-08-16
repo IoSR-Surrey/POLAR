@@ -193,23 +193,41 @@ def load_audio_tracks(tracks_dir, fs, track_names=None):
     return playlist
 
 
-# Highest global RMS that keeps current polar1/vbap stimuli within ±0.99 peak.
-DEFAULT_TARGET_RMS = 0.02484308
+# ITU-R BS.1770 integrated loudness target.
+DEFAULT_TARGET_LUFS = -30.0
+DEFAULT_MAX_PEAK = 0.99
 
 
-def normalize_audio(audio, target_rms=DEFAULT_TARGET_RMS):
-    """Scale so the global RMS equals target_rms, preserving inter-channel level."""
+def normalize_audio(audio, fs, target_lufs=DEFAULT_TARGET_LUFS, max_peak=DEFAULT_MAX_PEAK):
+    """Scale to target integrated LUFS, preserving inter-channel level.
+
+    If the LUFS gain would push the absolute peak above max_peak, gain is
+    reduced further so the file stays within that peak limit.
+    """
+    import pyloudnorm as pyln
+
     audio = np.asarray(audio, dtype=np.float64)
-    rms = float(np.sqrt(np.mean(audio ** 2)))
-    if rms > 0:
-        audio = audio * (target_rms / rms)
+    if audio.size == 0:
+        return audio.astype(np.float32)
+    data = audio.reshape(-1, 1) if audio.ndim == 1 else audio
+    meter = pyln.Meter(int(fs))
+    loudness = float(meter.integrated_loudness(data))
+    if not np.isfinite(loudness):
+        raise ValueError(f"Could not measure integrated loudness (got {loudness}).")
+    gain = 10.0 ** ((float(target_lufs) - loudness) / 20.0)
+    audio = audio * gain
+    peak = float(np.max(np.abs(audio)))
+    if peak > max_peak and peak > 0.0:
+        audio = audio * (max_peak / peak)
     return audio.astype(np.float32)
 
 
-def save_wav(path, audio, fs, target_rms=DEFAULT_TARGET_RMS):
+def save_wav(path, audio, fs, target_lufs=DEFAULT_TARGET_LUFS, max_peak=DEFAULT_MAX_PEAK):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    wavfile.write(path, fs, normalize_audio(audio, target_rms=target_rms))
+    wavfile.write(
+        path, fs, normalize_audio(audio, fs, target_lufs=target_lufs, max_peak=max_peak)
+    )
 
 
 def resolve_output_dirs(args):
@@ -256,7 +274,7 @@ def export_stimuli(
     tracks,
     out_dir,
     fs,
-    rms=DEFAULT_TARGET_RMS,
+    lufs=DEFAULT_TARGET_LUFS,
     dry_run=False,
 ):
     """Render filter x track combinations and write named WAVs.
@@ -281,7 +299,7 @@ def export_stimuli(
             )
             if not dry_run:
                 filtered = apply_spk_filters(mono, job["spk_filters"])
-                save_wav(out_path, filtered, fs, target_rms=rms)
+                save_wav(out_path, filtered, fs, target_lufs=lufs)
             written.append(out_path)
     return written
 
@@ -353,8 +371,8 @@ def parse_args():
         help="Sample rate in Hz. Defaults to config/hyperpameters.json env.fs.",
     )
     parser.add_argument(
-        "--rms", type=float, default=DEFAULT_TARGET_RMS,
-        help="Target RMS when writing WAVs.",
+        "--lufs", type=float, default=DEFAULT_TARGET_LUFS,
+        help="Target integrated loudness in LUFS when writing WAVs (default: -30).",
     )
     parser.add_argument(
         "--dry-run",
@@ -396,7 +414,7 @@ def main():
         tracks,
         args.out_dir,
         fs=fs,
-        rms=args.rms,
+        lufs=args.lufs,
         dry_run=args.dry_run,
     )
     print(f"Done ({len(written)} file{'s' if len(written) != 1 else ''}).")

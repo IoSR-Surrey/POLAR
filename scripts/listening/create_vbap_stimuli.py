@@ -150,12 +150,12 @@ def export_vbap_stimuli(
     target_angles,
     fs,
     optimisation_type="vbap",
-    rms=None,
+    lufs=None,
     dry_run=False,
 ):
     """Render angle x track combinations and write named WAVs."""
-    if rms is None:
-        rms = cls.DEFAULT_TARGET_RMS
+    if lufs is None:
+        lufs = cls.DEFAULT_TARGET_LUFS
     out_dir = Path(out_dir)
     opt_type = cls.sanitize_filename_field(optimisation_type, "optimisation_type")
     written = []
@@ -174,7 +174,7 @@ def export_vbap_stimuli(
             )
             if not dry_run:
                 audio = apply_vbap_gains(mono, gains)
-                cls.save_wav(out_path, audio, fs, target_rms=rms)
+                cls.save_wav(out_path, audio, fs, target_lufs=lufs)
             written.append(out_path)
     return written
 
@@ -248,8 +248,8 @@ def parse_args():
         help="Sample rate in Hz. Defaults to config/hyperpameters.json env.fs.",
     )
     parser.add_argument(
-        "--rms", type=float, default=None,
-        help="Target RMS when writing WAVs (default: create_localisation_stimuli.DEFAULT_TARGET_RMS).",
+        "--lufs", type=float, default=None,
+        help="Target integrated loudness in LUFS (default: create_localisation_stimuli.DEFAULT_TARGET_LUFS).",
     )
     parser.add_argument(
         "--dry-run",
@@ -301,7 +301,7 @@ def main():
         target_angles,
         fs=fs,
         optimisation_type=args.optimisation_type,
-        rms=cls.DEFAULT_TARGET_RMS if args.rms is None else args.rms,
+        lufs=cls.DEFAULT_TARGET_LUFS if args.lufs is None else args.lufs,
         dry_run=args.dry_run,
     )
     print(f"Done ({len(written)} file{'s' if len(written) != 1 else ''}).")
