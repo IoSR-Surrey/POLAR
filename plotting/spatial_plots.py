@@ -8,7 +8,7 @@ from plotting.batch_utils import mean_over_stimulus_batch
 LSD_LOWPASS_REFERENCE_DB = 14.31
 
 
-def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty, lsd, target_angle=None, listener_labels=None, max_arrow_length=1.2, lsd_vmax=None):
+def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty, lsd, target_angle=None, target_pos=None, listener_labels=None, max_arrow_length=1.2, lsd_vmax=None, arrow_head_width=0.12, arrow_head_length=0.14, arrow_linewidth=2):
 
     lstn_pos = ready_for_plotting(lstn_pos)
     spk_pos = ready_for_plotting(spk_pos)
@@ -29,9 +29,8 @@ def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty
     ax.scatter(spk_pos[:, 0], spk_pos[:, 1], c='black', marker='x', label='Speaker', zorder=3)
     ax.scatter(lstn_pos[:, 0], lstn_pos[:, 1], c='blue', marker='o', label='Listener', zorder=3)
 
-    arrow_head_width = 0.12
-    arrow_head_len = 0.14
-    arrow_width = 2
+    arrow_head_len = arrow_head_length
+    arrow_width = arrow_linewidth
 
     lsd = np.squeeze(ready_for_plotting(lsd))
     if lsd.size != n_listeners:
@@ -47,6 +46,15 @@ def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty
         )
         lsd_sm = cm.ScalarMappable(cmap=lsd_cmap, norm=lsd_norm)
         lsd_sm.set_array([])
+
+    if target_pos is not None:
+        target_pos = np.asarray(ready_for_plotting(target_pos), dtype=float).reshape(-1)
+        if target_pos.size != 2:
+            raise ValueError("target_pos must be a 2D position.")
+        ax.scatter(
+            target_pos[0], target_pos[1], c='red', marker='^', s=70,
+            label='Target', zorder=4,
+        )
 
     # Broadcast target_angle to one azimuth per listener (per-listener target
     # direction, drawn as a dashed ray emanating from each listener).
@@ -77,7 +85,13 @@ def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty
             ax.annotate(listener_labels[i], (float(x), float(y)), textcoords="offset points",
                         xytext=(5, 5), fontsize=8, color='blue', zorder=4)
 
-        if target_angles is not None:
+        if target_pos is not None:
+            ax.plot(
+                [float(x), float(target_pos[0])], [float(y), float(target_pos[1])],
+                color='black', linestyle='dashed', lw=1.2, zorder=5,
+                label='Target direction' if i == 0 else None,
+            )
+        elif target_angles is not None:
             t_dx = max_arrow_length * np.cos(np.deg2rad(target_angles[i]))
             t_dy = max_arrow_length * np.sin(np.deg2rad(target_angles[i]))
             ax.plot([float(x), float(x + t_dx)], [float(y), float(y + t_dy)],
@@ -86,6 +100,9 @@ def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty
 
     all_x = np.concatenate([lstn_pos[:, 0], spk_pos[:, 0], arrow_tips_x])
     all_y = np.concatenate([lstn_pos[:, 1], spk_pos[:, 1], arrow_tips_y])
+    if target_pos is not None:
+        all_x = np.concatenate([all_x, target_pos[:1]])
+        all_y = np.concatenate([all_y, target_pos[1:2]])
     margin = 0.25
     x_min, x_max = all_x.min() - margin, all_x.max() + margin
     y_min, y_max = all_y.min() - margin, all_y.max() + margin

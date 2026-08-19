@@ -31,9 +31,9 @@ from models.listener_based.desena2020.model import desena2020
 from models.train import ModelTrainer
 from plotting.spatial_plots import localisation_arrows_plot
 from plotting.batch_utils import mean_over_stimulus_batch
+from plotting.evaluation import _broadband_white_noise_batch
 from propagation.model import BinauralFreeFieldPropagation
 from datasets.stimulus_dataset import get_stim_loader
-from utils.dsp import bandpass_fir
 from utils.miscellaneous import (
     create_mtl_optimizer,
     load_npy_to_torch,
@@ -43,6 +43,9 @@ from utils.miscellaneous import (
 )
 from utils.seed import set_seed
 from utils.sofa_functions import get_IRs, get_template_for_llado2025_desena_2020, load_sofa, sofa_find
+
+# Long enough that circular inversion ≈ the plant's linear convolution (HRIR 256).
+LINEAR_CTC_N_FFT = 8192
 
 
 def compute_xtc_filters(H, reg=0.0):
@@ -54,11 +57,19 @@ def compute_xtc_filters(H, reg=0.0):
     return G
 
 
-def compute_ctc_filters(sofaile, target_angle, left_spk_angle=30.0, right_spk_angle=-30.0, n_fft=256):
-    """Classical CTC filters that render ``target_angle`` at the ears."""
+def compute_ctc_filters(sofaile, target_angle, left_spk_angle=30.0, right_spk_angle=-30.0, n_fft=None):
+    """Classical CTC filters that render ``target_angle`` at the ears.
+
+    ``n_fft`` is the invert size. The optimiser plant is linear convolution, so
+    ``n_fft`` must be much longer than the HRIRs or the inverse wraps. Default
+    8192 makes circular mix ≈ linear; ``n_fft`` equal to the HRIR length is the
+    old circular 256-point inverse.
+    """
     left_spk_hrirs = get_IRs(sofa_find(left_spk_angle, sofaile), sofaile).numpy()[0]
     right_spk_hrirs = get_IRs(sofa_find(right_spk_angle, sofaile), sofaile).numpy()[0]
     ref_hrirs = get_IRs(sofa_find(target_angle, sofaile), sofaile).numpy()[0]
+    if n_fft is None:
+        n_fft = LINEAR_CTC_N_FFT
 
     irs = np.stack([left_spk_hrirs, right_spk_hrirs], axis=1)  # (2 ears, 2 spk, T)
     H = np.fft.fft(irs, n=n_fft, axis=-1)
@@ -83,42 +94,55 @@ def smooth_third_octave(freq, mag_db):
     return smoothed
 
 
-def _rfft_norm(x, n):
-    return np.fft.rfft(x, n=n, axis=-1, norm="ortho")
-
-
 def _pad_time(x, n):
     pad = n - x.shape[-1]
     return x if pad == 0 else np.pad(x, [(0, 0)] * (x.ndim - 1) + [(0, pad)])
 
 
-def _align_to_reference(x, ref, ref_channel=0):
-    """Circularly shift ``x`` so channel ``ref_channel`` aligns with ``ref``."""
-    corr = np.correlate(x[ref_channel], ref[ref_channel], mode="full")
-    lag = int(np.argmax(corr) - (len(ref[ref_channel]) - 1))
-    return np.stack([np.roll(x[ch], -lag) for ch in range(x.shape[0])], axis=0)
+def _centre_pad(x, n):
+    pad = n - x.shape[-1]
+    if pad <= 0:
+        return x
+    left = pad // 2
+    right = pad - left
+    return np.pad(x, [(0, 0)] * (x.ndim - 1) + [(left, right)])
 
 
-def _unwrapped_phase(spec, freqs=None, remove_linear=False, f_min=80.0, f_max=20000.0):
-    """Unwrapped phase; optionally remove bulk linear delay estimated in-band."""
-    phase = np.unwrap(np.angle(spec), axis=-1)
-    if not remove_linear:
-        return phase
-    if freqs is None:
-        raise ValueError("freqs is required when remove_linear=True")
-    band = (freqs >= f_min) & (freqs <= f_max)
-    out = np.empty_like(phase)
-    for ch in range(phase.shape[0]):
-        coef = np.polyfit(freqs[band], phase[ch, band], 1)
-        out[ch] = phase[ch] - np.polyval(coef, freqs)
-    return out
+def _wrap_phase(x, bound=np.pi):
+    return (x + bound) % (2.0 * bound) - bound
+
+
+def _ipd_from_spec(spec):
+    """Wrapped IPD; positive = left leads."""
+    return _wrap_phase(np.angle(spec[0]) - np.angle(spec[1]))
+
+
+def _ipd_from_time(x, fs, n_fft_min=4096):
+    n_fft = max(n_fft_min, x.shape[-1])
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / fs)
+    spec = np.fft.rfft(x, n=n_fft, axis=-1)
+    return freqs, _ipd_from_spec(spec)
+
+
+def _table_wrapped_phase_error(
+    x, y, fs, remove_linear=False, n_fft_min=4096, f_min=20.0, f_max=20000.0,
+):
+    """Per-bin wrap(phi_x - phi_y) used by the Uniform [rad] table column."""
+    n_fft = max(n_fft_min, x.shape[-1], y.shape[-1])
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / fs)
+    px = np.unwrap(np.angle(np.fft.rfft(x, n=n_fft, axis=-1)), axis=-1)
+    py = np.unwrap(np.angle(np.fft.rfft(y, n=n_fft, axis=-1)), axis=-1)
+    if remove_linear:
+        band = (freqs >= f_min) & (freqs <= f_max)
+        for p in (px, py):
+            for ch in range(p.shape[0]):
+                coef = np.polyfit(freqs[band], p[ch, band], 1)
+                p[ch] = p[ch] - np.polyval(coef, freqs)
+    return freqs, _wrap_phase(px - py)
 
 
 def _prepare_ctc_plot_signals(proposed, proposed_col_only, ctc, reference_bin, fs, prop, stim):
-    proposed = bandpass_fir(proposed, fs=fs)
-    proposed_col_only = bandpass_fir(proposed_col_only, fs=fs)
-    ctc = bandpass_fir(ctc, fs=fs)
-
+    """Render impulse responses from the filters as saved (no extra gain or bandpass)."""
     with torch.no_grad():
         proposed_t = torch.as_tensor(proposed, device=stim.device, dtype=stim.dtype).unsqueeze(0)
         col_only_t = torch.as_tensor(proposed_col_only, device=stim.device, dtype=stim.dtype).unsqueeze(0)
@@ -141,7 +165,7 @@ def _prepare_ctc_plot_signals(proposed, proposed_col_only, ctc, reference_bin, f
     bin_col_only = _pad_time(bin_col_only, n_ear)
     bin_ctc = _pad_time(bin_ctc, n_ear)
 
-    n_filts = proposed.shape[-1]
+    n_filts = max(proposed.shape[-1], proposed_col_only.shape[-1], ctc.shape[-1])
     return {
         "proposed": proposed,
         "proposed_col_only": proposed_col_only,
@@ -177,6 +201,7 @@ def _plot_ctc_2x2(
     ax1.set_ylabel(ylabel, fontsize=fontsize)
     ax1.set_title(titles[0], fontsize=fontsize)
     ax1.set_xlim([80, 20000])
+    ax1.tick_params(axis="both", labelsize=12)
     if ylim is not None:
         ax1.set_ylim(ylim)
 
@@ -187,6 +212,7 @@ def _plot_ctc_2x2(
     ax2.semilogx(freqs_filt, filt_curves["ctc"][1], linewidth=3)
     ax2.grid()
     ax2.set_xlim([80, 20000])
+    ax2.tick_params(axis="both", labelsize=12)
     if ylim is not None:
         ax2.set_ylim(ylim)
 
@@ -200,6 +226,7 @@ def _plot_ctc_2x2(
     )
     ax3.grid()
     ax3.set_xlim([80, 20000])
+    ax3.tick_params(axis="both", labelsize=12)
     if ylim is not None:
         ax3.set_ylim(ylim)
     ax3.set_title(titles[2], fontsize=fontsize)
@@ -216,6 +243,7 @@ def _plot_ctc_2x2(
     )
     ax4.grid()
     ax4.set_xlim([80, 20000])
+    ax4.tick_params(axis="both", labelsize=12)
     if ylim is not None:
         ax4.set_ylim(ylim)
     ax4.set_title(titles[3], fontsize=fontsize)
@@ -234,11 +262,124 @@ def _plot_ctc_2x2(
     return fig
 
 
+def _set_phase_ylim(ax, *arrays, min_lim=2.0 * np.pi, max_ticks=7):
+    ymax = float(min_lim)
+    for a in arrays:
+        ymax = max(ymax, float(np.nanmax(np.abs(np.asarray(a)))))
+    n = max(1, int(np.ceil(ymax / np.pi - 1e-9)))
+    lim = n * np.pi
+    ax.set_ylim([-lim, lim])
+    step_k = 1
+    while (2 * n) / step_k + 1 > max_ticks:
+        step_k *= 2
+    ks = np.arange(-n, n + 1, step_k)
+    if ks[0] != -n:
+        ks = np.insert(ks, 0, -n)
+    if ks[-1] != n:
+        ks = np.append(ks, n)
+    ticks = ks * np.pi
+    labels = []
+    for k in ks:
+        if k == 0:
+            labels.append("0")
+        elif k == 1:
+            labels.append(r"$\pi$")
+        elif k == -1:
+            labels.append(r"$-\pi$")
+        else:
+            labels.append(rf"${k}\pi$")
+    ax.set_yticks(ticks)
+    ax.set_yticklabels(labels)
+
+
+def _plot_ctc_phase(freqs_filt, freqs_ear, filt_err, ipd, ipd_err):
+    """Delay-stripped filter wrap vs CTC, unwrapped IPD, wrapped IPD error."""
+    fontsize = 18
+    fig = plt.figure(figsize=(8, 6))
+    titles = (
+        "Left Loudspeaker vs CTC",
+        "Right Loudspeaker vs CTC",
+        "IPD",
+        "IPD Error",
+    )
+
+    ax1 = plt.subplot(2, 2, 1)
+    l1, = ax1.semilogx(freqs_filt, filt_err["proposed"][0], linewidth=3)
+    l1b, = ax1.semilogx(freqs_filt, filt_err["col_only"][0], linewidth=3)
+    l2, = ax1.semilogx(freqs_filt, filt_err["ctc"][0], linewidth=3)
+    ax1.grid()
+    ax1.set_ylabel("Phase error [rad]", fontsize=fontsize)
+    ax1.set_title(titles[0], fontsize=fontsize)
+    ax1.set_xlim([80, 20000])
+    ax1.tick_params(axis="both", labelsize=12)
+    _set_phase_ylim(
+        ax1, filt_err["proposed"][0], filt_err["col_only"][0], filt_err["ctc"][0],
+        min_lim=np.pi,
+    )
+
+    ax2 = plt.subplot(2, 2, 2)
+    ax2.semilogx(freqs_filt, filt_err["proposed"][1], linewidth=3)
+    ax2.semilogx(freqs_filt, filt_err["col_only"][1], linewidth=3)
+    ax2.semilogx(freqs_filt, filt_err["ctc"][1], linewidth=3)
+    ax2.grid()
+    ax2.set_title(titles[1], fontsize=fontsize)
+    ax2.set_xlim([80, 20000])
+    ax2.tick_params(axis="both", labelsize=12)
+    _set_phase_ylim(
+        ax2, filt_err["proposed"][1], filt_err["col_only"][1], filt_err["ctc"][1],
+        min_lim=np.pi,
+    )
+
+    ax3 = plt.subplot(2, 2, 3)
+    ax3.semilogx(freqs_ear, ipd["proposed"], linewidth=3)
+    ax3.semilogx(freqs_ear, ipd["col_only"], linewidth=3)
+    ax3.semilogx(freqs_ear, ipd["ctc"], linewidth=3)
+    l5, = ax3.semilogx(freqs_ear, ipd["ref"], linewidth=4, color="black", linestyle="--")
+    ax3.grid()
+    ax3.set_xlim([80, 20000])
+    ax3.tick_params(axis="both", labelsize=12)
+    _set_phase_ylim(ax3, ipd["proposed"], ipd["col_only"], ipd["ctc"], ipd["ref"])
+    ax3.set_title(titles[2], fontsize=fontsize)
+    ax3.set_xlabel("Frequency [Hz]", fontsize=fontsize)
+    ax3.set_ylabel("IPD [rad]", fontsize=fontsize)
+
+    ax4 = plt.subplot(2, 2, 4)
+    ax4.semilogx(freqs_ear, ipd_err["proposed"], linewidth=3)
+    ax4.semilogx(freqs_ear, ipd_err["col_only"], linewidth=3)
+    ax4.semilogx(freqs_ear, ipd_err["ctc"], linewidth=3)
+    ax4.semilogx(freqs_ear, np.zeros_like(freqs_ear), linewidth=4, color="black", linestyle="--")
+    ax4.grid()
+    ax4.set_xlim([80, 20000])
+    ax4.tick_params(axis="both", labelsize=12)
+    _set_phase_ylim(
+        ax4, ipd_err["proposed"], ipd_err["col_only"], ipd_err["ctc"],
+        min_lim=np.pi,
+    )
+    ax4.set_title(titles[3], fontsize=fontsize)
+    ax4.set_xlabel("Frequency [Hz]", fontsize=fontsize)
+    ax4.set_ylabel("IPD error [rad]", fontsize=fontsize)
+
+    fig.legend(
+        [l1, l1b, l2, l5],
+        ["Proposed Method (Col. + IPD)", "Proposed Method (Col. only)", "CTC", "Reference"],
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.00),
+        ncol=2,
+        fontsize=fontsize,
+        frameon=False,
+    )
+    plt.tight_layout(rect=[0, 0, 1, 0.84])
+    return fig
+
+
 def plot_ctc_time_domain(proposed, proposed_col_only, ctc, fs):
     """Time-domain taps of left/right loudspeaker filters."""
     fontsize = 18
-    n_taps = proposed.shape[-1]
+    n_taps = max(proposed.shape[-1], proposed_col_only.shape[-1], ctc.shape[-1])
     time_ms = np.arange(n_taps) / fs * 1000
+    proposed = _centre_pad(proposed, n_taps)
+    proposed_col_only = _centre_pad(proposed_col_only, n_taps)
+    ctc = _centre_pad(ctc, n_taps)
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
     titles = ("Left Loudspeaker Filter", "Right Loudspeaker Filter")
@@ -251,6 +392,7 @@ def plot_ctc_time_domain(proposed, proposed_col_only, ctc, fs):
             lines.append(ax.plot(time_ms, filt[ch], linewidth=2)[0])
         ax.set_title(titles[ch], fontsize=fontsize)
         ax.set_xlabel("Time [ms]", fontsize=fontsize)
+        ax.tick_params(axis="both", labelsize=12)
         ax.grid(True)
         if ch == 0:
             ax.set_ylabel("Amplitude", fontsize=fontsize)
@@ -269,87 +411,134 @@ def plot_ctc_time_domain(proposed, proposed_col_only, ctc, fs):
 
 
 def plot_ctc_comparison(proposed, proposed_col_only, ctc, reference_bin, fs, prop, stim):
-    """Fig7-style magnitude and phase comparison of filters and ear signals."""
+    """1/3-octave magnitude, wrapped filter phase vs CTC, and ear IPD."""
+    fig_mag = plot_ctc_magnitude(
+        proposed, proposed_col_only, ctc, reference_bin, fs, prop, stim, smooth=True,
+    )
     sigs = _prepare_ctc_plot_signals(proposed, proposed_col_only, ctc, reference_bin, fs, prop, stim)
 
-    proposed_spec = _rfft_norm(sigs["proposed"], sigs["n_filts"])
-    col_only_spec = _rfft_norm(sigs["proposed_col_only"], sigs["n_filts"])
-    ctc_spec = _rfft_norm(sigs["ctc"], sigs["n_filts"])
-    ref_spec = _rfft_norm(sigs["ref"], sigs["n_ear"])
-    bin_proposed_spec = _rfft_norm(sigs["bin_proposed"], sigs["n_ear"])
-    bin_col_only_spec = _rfft_norm(sigs["bin_col_only"], sigs["n_ear"])
-    bin_ctc_spec = _rfft_norm(sigs["bin_ctc"], sigs["n_ear"])
-
+    proposed_spec = np.fft.rfft(sigs["proposed"], n=sigs["n_filts"], axis=-1)
+    ctc_spec = np.fft.rfft(sigs["ctc"], n=sigs["n_filts"], axis=-1)
     proposed_f = 20 * np.log10(np.abs(proposed_spec) + 1e-12)
-    col_only_f = 20 * np.log10(np.abs(col_only_spec) + 1e-12)
     ctc_f = 20 * np.log10(np.abs(ctc_spec) + 1e-12)
-
     lsd = np.sqrt(np.mean((ctc_f - proposed_f) ** 2, axis=-1)).mean()
     print(f"Log Spectral Distance between CTC and proposed filters: {lsd:.2f} dB")
 
-    ref_f = 20 * np.log10(np.abs(ref_spec) + 1e-12)
-    bin_proposed_f = 20 * np.log10(np.abs(bin_proposed_spec) + 1e-12)
-    bin_col_only_f = 20 * np.log10(np.abs(bin_col_only_spec) + 1e-12)
-    bin_ctc_f = 20 * np.log10(np.abs(bin_ctc_spec) + 1e-12)
-
-    fig_mag = _plot_ctc_2x2(
-        sigs["freqs_filt"],
-        sigs["freqs_ref"],
-        filt_curves={
-            "proposed": [smooth_third_octave(sigs["freqs_filt"], proposed_f[0]),
-                         smooth_third_octave(sigs["freqs_filt"], proposed_f[1])],
-            "col_only": [smooth_third_octave(sigs["freqs_filt"], col_only_f[0]),
-                         smooth_third_octave(sigs["freqs_filt"], col_only_f[1])],
-            "ctc": [smooth_third_octave(sigs["freqs_filt"], ctc_f[0]),
-                    smooth_third_octave(sigs["freqs_filt"], ctc_f[1])],
-        },
-        ear_curves={
-            "proposed": [smooth_third_octave(sigs["freqs_ref"], bin_proposed_f[0]),
-                         smooth_third_octave(sigs["freqs_ref"], bin_proposed_f[1])],
-            "col_only": [smooth_third_octave(sigs["freqs_ref"], bin_col_only_f[0]),
-                         smooth_third_octave(sigs["freqs_ref"], bin_col_only_f[1])],
-            "ctc": [smooth_third_octave(sigs["freqs_ref"], bin_ctc_f[0]),
-                    smooth_third_octave(sigs["freqs_ref"], bin_ctc_f[1])],
-            "ref": [smooth_third_octave(sigs["freqs_ref"], ref_f[0]),
-                    smooth_third_octave(sigs["freqs_ref"], ref_f[1])],
-        },
-        ylabel="Magnitude [dB]",
-        ylim=[-60, 10],
+    freqs_filt, filt_proposed = _table_wrapped_phase_error(
+        sigs["proposed"], sigs["ctc"], fs, remove_linear=True,
+    )
+    _, filt_col_only = _table_wrapped_phase_error(
+        sigs["proposed_col_only"], sigs["ctc"], fs, remove_linear=True,
     )
 
-    # Absolute unwrapped phase is dominated by bulk delay: the HRIR reference is
-    # early, while CTC/proposed go through centered FIRs (~n_taps/2). Align ears
-    # to the reference before taking phase; remove linear phase from filters only.
-    bin_proposed_aligned = _align_to_reference(sigs["bin_proposed"], sigs["ref"])
-    bin_col_only_aligned = _align_to_reference(sigs["bin_col_only"], sigs["ref"])
-    bin_ctc_aligned = _align_to_reference(sigs["bin_ctc"], sigs["ref"])
+    freqs_ear, ipd_w_proposed = _ipd_from_time(sigs["bin_proposed"], fs)
+    _, ipd_w_col_only = _ipd_from_time(sigs["bin_col_only"], fs)
+    _, ipd_w_ctc = _ipd_from_time(sigs["bin_ctc"], fs)
+    _, ipd_w_ref = _ipd_from_time(sigs["ref"], fs)
+    ipd_w = {
+        "proposed": ipd_w_proposed,
+        "col_only": ipd_w_col_only,
+        "ctc": ipd_w_ctc,
+        "ref": ipd_w_ref,
+    }
+    ipd = {key: np.unwrap(val) for key, val in ipd_w.items()}
+    ipd_err = {
+        "proposed": _wrap_phase(ipd_w["proposed"] - ipd_w["ref"]),
+        "col_only": _wrap_phase(ipd_w["col_only"] - ipd_w["ref"]),
+        "ctc": _wrap_phase(ipd_w["ctc"] - ipd_w["ref"]),
+    }
 
-    proposed_p = _unwrapped_phase(proposed_spec, sigs["freqs_filt"], remove_linear=True)
-    col_only_p = _unwrapped_phase(col_only_spec, sigs["freqs_filt"], remove_linear=True)
-    ctc_p = _unwrapped_phase(ctc_spec, sigs["freqs_filt"], remove_linear=True)
-    ref_p = _unwrapped_phase(ref_spec)
-    bin_proposed_p = _unwrapped_phase(_rfft_norm(bin_proposed_aligned, sigs["n_ear"]))
-    bin_col_only_p = _unwrapped_phase(_rfft_norm(bin_col_only_aligned, sigs["n_ear"]))
-    bin_ctc_p = _unwrapped_phase(_rfft_norm(bin_ctc_aligned, sigs["n_ear"]))
-
-    fig_phase = _plot_ctc_2x2(
-        sigs["freqs_filt"],
-        sigs["freqs_ref"],
-        filt_curves={
-            "proposed": proposed_p,
-            "col_only": col_only_p,
-            "ctc": ctc_p,
+    fig_phase = _plot_ctc_phase(
+        freqs_filt,
+        freqs_ear,
+        filt_err={
+            "proposed": filt_proposed,
+            "col_only": filt_col_only,
+            "ctc": np.zeros_like(filt_proposed),
         },
-        ear_curves={
-            "proposed": bin_proposed_p,
-            "col_only": bin_col_only_p,
-            "ctc": bin_ctc_p,
-            "ref": ref_p,
-        },
-        ylabel="Phase [rad]",
-        ylim=None,
+        ipd=ipd,
+        ipd_err=ipd_err,
     )
     return fig_mag, fig_phase
+
+
+def plot_ctc_magnitude(
+    proposed,
+    proposed_col_only,
+    ctc,
+    reference_bin,
+    fs,
+    prop,
+    stim,
+    smooth=False,
+):
+    """Magnitude comparison from the raw optimiser filters (unnormalized rfft)."""
+    with torch.no_grad():
+        proposed_t = torch.as_tensor(proposed, device=stim.device, dtype=stim.dtype).unsqueeze(0)
+        col_only_t = torch.as_tensor(proposed_col_only, device=stim.device, dtype=stim.dtype).unsqueeze(0)
+        ctc_t = torch.as_tensor(ctc, device=stim.device, dtype=stim.dtype).unsqueeze(0)
+        bin_proposed = prop(stim, proposed_t).detach().cpu().numpy()[0, 0]
+        bin_col_only = prop(stim, col_only_t).detach().cpu().numpy()[0, 0]
+        bin_ctc = prop(stim, ctc_t).detach().cpu().numpy()[0, 0]
+
+    ref = reference_bin.detach().cpu().numpy()
+    if ref.ndim == 3:
+        ref = ref[0]
+
+    n_ear = max(ref.shape[-1], bin_proposed.shape[-1], bin_col_only.shape[-1], bin_ctc.shape[-1])
+    ref = _pad_time(ref, n_ear)
+    bin_proposed = _pad_time(bin_proposed, n_ear)
+    bin_col_only = _pad_time(bin_col_only, n_ear)
+    bin_ctc = _pad_time(bin_ctc, n_ear)
+
+    n_filts = max(proposed.shape[-1], proposed_col_only.shape[-1], ctc.shape[-1])
+    freqs_filt = np.fft.rfftfreq(n_filts, d=1 / fs)
+    freqs_ref = np.fft.rfftfreq(n_ear, d=1 / fs)
+
+    def _mag(x, n):
+        return 20.0 * np.log10(np.abs(np.fft.rfft(x, n=n, axis=-1)) + 1e-12)
+
+    proposed_f = _mag(proposed, n_filts)
+    col_only_f = _mag(proposed_col_only, n_filts)
+    ctc_f = _mag(ctc, n_filts)
+    bin_proposed_f = _mag(bin_proposed, n_ear)
+    bin_col_only_f = _mag(bin_col_only, n_ear)
+    bin_ctc_f = _mag(bin_ctc, n_ear)
+    ref_f = _mag(ref, n_ear)
+
+    if smooth:
+        proposed_f = np.stack([smooth_third_octave(freqs_filt, proposed_f[0]),
+                               smooth_third_octave(freqs_filt, proposed_f[1])])
+        col_only_f = np.stack([smooth_third_octave(freqs_filt, col_only_f[0]),
+                               smooth_third_octave(freqs_filt, col_only_f[1])])
+        ctc_f = np.stack([smooth_third_octave(freqs_filt, ctc_f[0]),
+                          smooth_third_octave(freqs_filt, ctc_f[1])])
+        bin_proposed_f = np.stack([smooth_third_octave(freqs_ref, bin_proposed_f[0]),
+                                   smooth_third_octave(freqs_ref, bin_proposed_f[1])])
+        bin_col_only_f = np.stack([smooth_third_octave(freqs_ref, bin_col_only_f[0]),
+                                   smooth_third_octave(freqs_ref, bin_col_only_f[1])])
+        bin_ctc_f = np.stack([smooth_third_octave(freqs_ref, bin_ctc_f[0]),
+                              smooth_third_octave(freqs_ref, bin_ctc_f[1])])
+        ref_f = np.stack([smooth_third_octave(freqs_ref, ref_f[0]),
+                          smooth_third_octave(freqs_ref, ref_f[1])])
+
+    return _plot_ctc_2x2(
+        freqs_filt,
+        freqs_ref,
+        filt_curves={
+            "proposed": proposed_f,
+            "col_only": col_only_f,
+            "ctc": ctc_f,
+        },
+        ear_curves={
+            "proposed": bin_proposed_f,
+            "col_only": bin_col_only_f,
+            "ctc": bin_ctc_f,
+            "ref": ref_f,
+        },
+        ylabel="Magnitude [dB]",
+        ylim=[-45, 15],
+    )
 
 
 def _evaluate_llado_localisation(filters, prop, stim, llado_model, desena_model, lsd_model, n_listeners):
@@ -385,9 +574,7 @@ def plot_ctc_localisation(
     fs,
     device,
     dtype,
-    stim_length_ms=100.0,
     gtfb_path="data/banks/gtfb_48k.npy",
-    seed=48,
 ):
     """Localisation arrows for proposed / col-only / CTC via the llado model."""
     gtfb = load_npy_to_torch(gtfb_path, device=device, dtype=dtype)
@@ -397,15 +584,7 @@ def plot_ctc_localisation(
     lsd_model = LSD(fs, sofaile, target_angles, device=device, dtype=dtype)
     n_listeners = len(lstn_pos)
 
-    # White-noise probe (impulse is too short for gammatone / IACC cues).
-    n_samples = int(round(stim_length_ms * fs / 1000.0))
-    rng = np.random.default_rng(seed)
-    stim = torch.as_tensor(
-        rng.standard_normal((1, 1, n_samples), dtype=np.float32),
-        device=device,
-        dtype=dtype,
-    )
-    stim = stim / stim.std().clamp_min(1e-8)
+    stim = _broadband_white_noise_batch(fs, device, dtype)
 
     results = {
         "Proposed (Col. + IPD)": _evaluate_llado_localisation(
@@ -553,9 +732,22 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--n-taps", type=int, default=256)
+    parser.add_argument(
+        "--ctc-n-fft",
+        type=int,
+        default=None,
+        help=(
+            "FFT length for the classical CTC inverse. Default "
+            f"{LINEAR_CTC_N_FFT} (linear-convolution approximation). "
+            "Pass the same value as --n-taps for the old circular invert."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=48)
     parser.add_argument("--col-weight", type=float, default=1.0)
     parser.add_argument("--ipd-weight", type=float, default=0.1)
+    parser.add_argument("--ipd-f-min", type=float, default=200.0)
+    parser.add_argument("--ipd-f-max", type=float, default=20000.0)
+    parser.add_argument("--ipd-mse", action="store_true", help="Use mean squared wrapped IPD error instead of MAE.")
     parser.add_argument("--cagrad-c", type=float, default=1.0)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--dtype", type=str, default="float32")
@@ -597,7 +789,19 @@ def main():
     )
 
     lsd_model = LSD(fs, sofaile, target_angles, device=device, dtype=dtype)
-    ipd_model = IPD(fs, sofaile, target_angles, f_max=20000.0, device=device, dtype=dtype)
+    ipd_model = IPD(
+        fs, sofaile, target_angles,
+        f_min=args.ipd_f_min, f_max=args.ipd_f_max,
+        use_mse=args.ipd_mse,
+        device=device, dtype=dtype,
+    )
+    ipd_loss_name = "MSE" if args.ipd_mse else "MAE"
+    print(f"LSD trainer: MSE vs 0 (squares the LSD RMS)")
+    print(f"IPD band: {args.ipd_f_min:g}–{args.ipd_f_max:g} Hz ({ipd_loss_name} in the model)")
+    # IPD(use_mse=True) already returns mean(e^2); L1 vs 0 keeps that as MSE.
+    # mse_loss vs 0 would square it again.
+    ipd_criterion = F.l1_loss if args.ipd_mse else F.mse_loss
+    print(f"IPD trainer: {'L1 vs 0' if args.ipd_mse else 'MSE vs 0'}")
 
     # Impulse kept for plotting / final eval; training may use bandpass batches.
     plot_stim = torch.zeros(1, 1, 1, dtype=dtype, device=device)
@@ -629,6 +833,8 @@ def main():
     else:
         print("Using impulse stimulus")
 
+    ctc_n_fft = LINEAR_CTC_N_FFT if args.ctc_n_fft is None else args.ctc_n_fft
+
     saving_manager = SavingManager(args.output_dir, timestamp=True)
     write_run_config(saving_manager.output_dir, {
         "script": "scripts/ctc_optimisation.py",
@@ -641,6 +847,10 @@ def main():
         "target_pos": target_pos.detach().cpu().tolist(),
         "lstn_pos": lstn_pos.detach().cpu().tolist(),
         "spk_pos": spk_pos.detach().cpu().tolist(),
+        "lsd_criterion": "mse_loss",
+        "ipd_criterion": "l1_loss" if args.ipd_mse else "mse_loss",
+        "ipd_model": "mse" if args.ipd_mse else "mae",
+        "ctc_n_fft": ctc_n_fft,
     })
 
     targets_joint = {
@@ -652,7 +862,7 @@ def main():
     t0 = time.time()
     spk_filters, binaural_signals, trainer = _optimise_filters(
         models=[lsd_model, ipd_model],
-        criterions=[F.l1_loss, F.l1_loss],
+        criterions=[F.mse_loss, ipd_criterion],
         weights=[args.col_weight, args.ipd_weight],
         targets=targets_joint,
         prop=prop,
@@ -676,12 +886,13 @@ def main():
 
     if args.skip_col_only:
         est_filters_col_only = est_filters.copy()
+        spk_filters_col_only_np = spk_filters.squeeze(0).detach().cpu().numpy()
     else:
         print("=== Optimising colouration only ===")
         t0 = time.time()
         spk_filters_col_only, _, _ = _optimise_filters(
             models=[lsd_model],
-            criterions=[F.l1_loss],
+            criterions=[F.mse_loss],
             weights=[args.col_weight],
             targets={"LSD": torch.zeros(1, n_listeners, dtype=dtype, device=device)},
             prop=prop,
@@ -699,10 +910,15 @@ def main():
             saving_manager=None,
         )
         print(f"Colouration-only optimisation time: {time.time() - t0:.2f}s")
-        est_filters_col_only = spk_filters_col_only.squeeze(0).detach().cpu().numpy()
+        spk_filters_col_only_np = spk_filters_col_only.squeeze(0).detach().cpu().numpy()
+        est_filters_col_only = spk_filters_col_only_np.copy()
         est_filters_col_only /= np.max(np.abs(est_filters_col_only)) / 0.9
 
-    ctc_filters = compute_ctc_filters(sofaile, args.target_angle, n_fft=args.n_taps)
+    ctc_filters = compute_ctc_filters(sofaile, args.target_angle, n_fft=ctc_n_fft)
+    print(
+        f"CTC inverse n_fft={ctc_n_fft} "
+        f"({'linear-convolution approximation' if ctc_n_fft > args.n_taps else 'circular, same length as n_taps'})"
+    )
     # Classical CTC assumes no 1/r; when prop applies attenuation, boost filters by r
     # so CTC ear levels match the same plant. Safe because 1/r is frequency-independent.
     if apply_distance_attenuation:
@@ -715,9 +931,20 @@ def main():
         )
 
     reference_bin = lsd_model.compute_binaural_reference_signals(plot_stim)
+    proposed_raw = spk_filters.squeeze(0).detach().cpu().numpy()
+    fig_mag_raw = plot_ctc_magnitude(
+        proposed=proposed_raw,
+        proposed_col_only=spk_filters_col_only_np,
+        ctc=ctc_filters,
+        reference_bin=reference_bin,
+        fs=fs,
+        prop=prop,
+        stim=plot_stim,
+        smooth=False,
+    )
     fig_mag, fig_phase = plot_ctc_comparison(
-        proposed=est_filters,
-        proposed_col_only=est_filters_col_only,
+        proposed=proposed_raw,
+        proposed_col_only=spk_filters_col_only_np,
         ctc=ctc_filters,
         reference_bin=reference_bin,
         fs=fs,
@@ -725,14 +952,14 @@ def main():
         stim=plot_stim,
     )
     fig_taps = plot_ctc_time_domain(
-        proposed=est_filters,
-        proposed_col_only=est_filters_col_only,
+        proposed=proposed_raw,
+        proposed_col_only=spk_filters_col_only_np,
         ctc=ctc_filters,
         fs=fs,
     )
     loc_figs, loc_results = plot_ctc_localisation(
-        proposed=est_filters,
-        proposed_col_only=est_filters_col_only,
+        proposed=proposed_raw,
+        proposed_col_only=spk_filters_col_only_np,
         ctc=ctc_filters,
         prop=prop,
         lstn_pos=lstn_pos,
@@ -743,10 +970,10 @@ def main():
         fs=fs,
         device=device,
         dtype=dtype,
-        seed=args.seed,
     )
 
     saving_manager.save("spk_filters", spk_filters)
+    saving_manager.save("spk_filters_col_only", spk_filters_col_only_np)
     saving_manager.save("est_filters", est_filters)
     saving_manager.save("est_filters_col_only", est_filters_col_only)
     saving_manager.save("ctc_filters", ctc_filters)
@@ -758,6 +985,7 @@ def main():
     saving_manager.save_new_plots(
         "ctc_comparison",
         names=[
+            "ctc_comparison_raw",
             "ctc_comparison",
             "ctc_comparison_phase",
             "ctc_comparison_taps",
@@ -766,6 +994,7 @@ def main():
             "localisation_ctc",
         ],
     )
+    plt.close(fig_mag_raw)
     plt.close(fig_mag)
     plt.close(fig_phase)
     plt.close(fig_taps)

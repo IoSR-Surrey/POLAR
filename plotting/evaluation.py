@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 
 from utils.sofa_functions import get_template_for_llado2025_desena_2020
@@ -6,7 +7,19 @@ from propagation.model import BinauralFreeFieldPropagation
 from models.listener_based.llado2025.model import llado2025_grad_surgery
 from models.listener_based.desena2020.model import desena2020
 from models.listener_based.LSD.model import LSD
-from plotting.batch_utils import get_white_noise_batch, load_plot_config, mean_over_stimulus_batch
+from plotting.batch_utils import load_plot_config, mean_over_stimulus_batch
+
+PLOT_STIM_LENGTH_MS = 100.0
+PLOT_N_STIM = 8
+PLOT_STIM_SEED = 42
+
+
+def _broadband_white_noise_batch(fs, device, dtype):
+    n_samples = int(round(PLOT_STIM_LENGTH_MS * fs / 1000.0))
+    rng = np.random.default_rng(PLOT_STIM_SEED)
+    stim = rng.standard_normal((PLOT_N_STIM, 1, n_samples), dtype=np.float32)
+    stim = stim / np.std(stim).clip(min=1e-8)
+    return torch.as_tensor(stim, device=device, dtype=dtype)
 
 
 def _final_spk_filters(saved_data):
@@ -19,7 +32,7 @@ def _final_spk_filters(saved_data):
 
 
 def compute_white_noise_plot_outputs(saving_manager, config_path="config/hyperpameters.json"):
-    """Evaluate final speaker filters on a white-noise batch for plotting."""
+    """Evaluate final speaker filters on 8 draws of 100 ms white noise, then average."""
     saved_data = saving_manager.saved_data
     required_keys = ("lstn_pos", "spk_pos", "spk_filters", "sofaile")
     if not all(key in saved_data for key in required_keys):
@@ -27,15 +40,19 @@ def compute_white_noise_plot_outputs(saving_manager, config_path="config/hyperpa
 
     config = load_plot_config(config_path)
     env_config = config["env"]
-    fs = env_config["fs"]
+    fs = int(saved_data["fs"][0]) if "fs" in saved_data else env_config["fs"]
     dtype = getattr(torch, env_config["dtype"])
     device = torch.device(env_config["device"])
+    if "apply_distance_attenuation" in saved_data:
+        apply_distance_attenuation = bool(saved_data["apply_distance_attenuation"][0])
+    else:
+        apply_distance_attenuation = bool(env_config.get("apply_distance_attenuation", False))
 
     lstn_pos = saved_data["lstn_pos"][0].to(device=device, dtype=dtype)
     spk_pos = saved_data["spk_pos"][0].to(device=device, dtype=dtype)
     sofaile = saved_data["sofaile"][0]
     spk_filters = _final_spk_filters(saved_data).to(device=device, dtype=dtype)
-    stim = get_white_noise_batch(config, device=device, dtype=dtype, shuffle=False)
+    stim = _broadband_white_noise_batch(fs, device, dtype)
 
     if "gtfb" in saved_data:
         gtfb = saved_data["gtfb"][0].to(device=device, dtype=dtype)
@@ -43,7 +60,11 @@ def compute_white_noise_plot_outputs(saving_manager, config_path="config/hyperpa
         gtfb = load_npy_to_torch("data/banks/gtfb_48k.npy", device=device, dtype=dtype)
 
     hrirs = get_template_for_llado2025_desena_2020(sofaile, device=device, dtype=dtype)
-    prop = BinauralFreeFieldPropagation(fs, lstn_pos, spk_pos, sofaile, device=device, dtype=dtype)
+    prop = BinauralFreeFieldPropagation(
+        fs, lstn_pos, spk_pos, sofaile,
+        apply_distance_attenuation=apply_distance_attenuation,
+        device=device, dtype=dtype,
+    )
     binaural_signals = prop(stim, spk_filters)
     binaural_flat = binaural_signals.reshape(-1, 2, binaural_signals.shape[-1])
 
