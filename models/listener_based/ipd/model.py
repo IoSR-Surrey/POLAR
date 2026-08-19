@@ -5,7 +5,7 @@ import torchaudio.functional as TF
 from utils.sofa_functions import sofa_find, get_IRs
 
 
-def _wrap_to_pi(x):
+def  _wrap_to_pi(x):
     return (x + torch.pi) % (2 * torch.pi) - torch.pi
 
 
@@ -57,7 +57,7 @@ class IPD(nn.Module):
         self.target_hrirs = get_IRs(target_idx, sofaile, device=device, dtype=dtype)
 
         self.fft_frequencies = torch.fft.rfftfreq(self.n_fft, 1 / fs, device=device, dtype=dtype)
-        self.erb_frequency_bin_weights = self._erb_frequency_bin_weights()
+        self.erb_frequency_bin_weights = self._erb_frequency_bin_weights(self.fft_frequencies)
 
         self.freq_bin_mask = (self.fft_frequencies >= self.f_min) & (self.fft_frequencies <= self.f_max)
         if not self.freq_bin_mask.any():
@@ -88,19 +88,22 @@ class IPD(nn.Module):
                 f"got {binaural_signals.shape} and {binaural_reference_signals.shape}."
             )
 
-        # Zero-pad / truncate to n_fft like LSD; propagation can be longer than the HRIR reference.
-        bin_f = torch.fft.rfft(binaural_signals, n=self.n_fft, dim=-1)
-        ref_f = torch.fft.rfft(binaural_reference_signals, n=self.n_fft, dim=-1)
+        # Pad to at least n_fft, or to the longer ear signal, matching LSD.
+        n_fft = max(self.n_fft, binaural_signals.shape[-1], binaural_reference_signals.shape[-1])
+        _, freq_bin_mask, erb_weights = self._fft_bin_metadata(n_fft)
+
+        bin_f = torch.fft.rfft(binaural_signals, n=n_fft, dim=-1)
+        ref_f = torch.fft.rfft(binaural_reference_signals, n=n_fft, dim=-1)
 
         # IPD := phase(L) - phase(R); positive = left leads
         ipd_bin = _wrap_to_pi(torch.angle(bin_f[..., 0, :]) - torch.angle(bin_f[..., 1, :]))
         ipd_ref = _wrap_to_pi(torch.angle(ref_f[..., 0, :]) - torch.angle(ref_f[..., 1, :]))
 
-        ipd_err = _wrap_to_pi(ipd_bin - ipd_ref)[..., self.freq_bin_mask]
+        ipd_err = _wrap_to_pi(ipd_bin - ipd_ref)[..., freq_bin_mask]
         bin_err = ipd_err ** 2 if self.use_mse else torch.abs(ipd_err)
 
         if self.erb_weighting:
-            weights = self.erb_frequency_bin_weights[..., self.freq_bin_mask]
+            weights = erb_weights[..., freq_bin_mask]
             return (bin_err * weights).sum(dim=-1)
 
         return bin_err.mean(dim=-1)
@@ -117,9 +120,16 @@ class IPD(nn.Module):
 
         return ear_signals.view(n_stim * n_lstn, 2, -1)
 
-    def _erb_frequency_bin_weights(self, eps=1e-12):
+    def _fft_bin_metadata(self, n_fft):
+        if n_fft == self.n_fft:
+            return self.fft_frequencies, self.freq_bin_mask, self.erb_frequency_bin_weights
+        fft_frequencies = torch.fft.rfftfreq(n_fft, 1 / self.fs, device=self.device, dtype=self.dtype)
+        freq_bin_mask = (fft_frequencies >= self.f_min) & (fft_frequencies <= self.f_max)
+        return fft_frequencies, freq_bin_mask, self._erb_frequency_bin_weights(fft_frequencies)
+
+    def _erb_frequency_bin_weights(self, fft_frequencies, eps=1e-12):
         """Per-FFT-bin ERB weights with sum(weights) == 1 (same as LSD)."""
-        erb = 0.108 * self.fft_frequencies + 24.7
+        erb = 0.108 * fft_frequencies + 24.7
         inv_erb = 1.0 / erb.clamp(min=eps)
         w = inv_erb / inv_erb.max()
         return w / w.sum()
