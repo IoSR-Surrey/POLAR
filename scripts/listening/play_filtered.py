@@ -242,13 +242,8 @@ def load_spk_filters(output_dir):
 def apply_spk_filters(stimulus, spk_filters):
     stim = torch.tensor(stimulus, dtype=torch.float32).view(1, 1, -1)
     filters = torch.tensor(spk_filters, dtype=torch.float32).unsqueeze(0)
-    channels = []
-    for source_idx in range(filters.shape[1]):
-        source_filter = filters[:, source_idx:source_idx + 1, :]
-        filtered = TF.convolve(stim, source_filter, mode="full")
-        channels.append(filtered.squeeze().numpy())
-    min_len = min(len(ch) for ch in channels)
-    return np.stack([ch[:min_len] for ch in channels], axis=1)
+    filtered = TF.fftconvolve(stim, filters, mode="full")
+    return filtered.squeeze(0).T.numpy()
 
 
 def apply_vbap(stimulus, spk_pos, target_angle):
