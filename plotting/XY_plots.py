@@ -135,6 +135,65 @@ def frequency_domain_filters_plot(filters, fs=48000, nfft = 2048):
 
     plt.tight_layout()
 
+# Okabe–Ito (yellow skipped) for per-task gradient traces.
+_TASK_GRADIENT_COLORS = {
+    "llado2025_grad_surgery": "#0072B2",
+    "desena2020": "#E69F00",
+    "LSD": "#009E73",
+    "SecondMoment": "#D55E00",
+}
+_TASK_GRADIENT_COLOR_CYCLE = ("#0072B2", "#E69F00", "#009E73", "#D55E00", "#56B4E9", "#CC79A7", "#000000")
+_TASK_GRADIENT_LINESTYLES = {
+    "llado2025_grad_surgery": "-",
+    "desena2020": "--",
+    "LSD": "-.",
+    "SecondMoment": ":",
+}
+_TASK_DISPLAY_NAMES = {
+    "llado2025_grad_surgery": "Localisation",
+    "desena2020": "Localisation uncertainty",
+    "LSD": "Colouration",
+    "SecondMoment": "Filter spread",
+}
+
+
+def _task_gradient_style(name, index):
+    color = _TASK_GRADIENT_COLORS.get(name, _TASK_GRADIENT_COLOR_CYCLE[index % len(_TASK_GRADIENT_COLOR_CYCLE)])
+    linestyle = _TASK_GRADIENT_LINESTYLES.get(name, "-")
+    return color, linestyle
+
+
+def _task_display_name(name):
+    return _TASK_DISPLAY_NAMES.get(name, name)
+
+
+def _epoch_matrix(grads):
+    arr = np.asarray(ready_for_plotting(grads), dtype=np.float64)
+    if arr.ndim == 1:
+        return arr.reshape(1, -1)
+    return arr.reshape(arr.shape[0], -1)
+
+
+def _cosine_rows(a, b, eps=1e-30):
+    a = _epoch_matrix(a)
+    b = _epoch_matrix(b)
+    num = np.sum(a * b, axis=1)
+    den = np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1)
+    return num / np.maximum(den, eps)
+
+
+def moving_average(values, window):
+    """Centered moving average. Returns (epoch_axis, smoothed)."""
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    n = values.size
+    if window is None or window <= 1 or n == 0:
+        return np.arange(n, dtype=np.float64), values
+    window = min(int(window), n)
+    smoothed = np.convolve(values, np.ones(window) / window, mode="valid")
+    epochs = np.arange(smoothed.size, dtype=np.float64) + 0.5 * (window - 1)
+    return epochs, smoothed
+
+
 def raw_grad_cosine_to_reference_plot(raw_grads, reference_grads, task_names, title):
     """Per-task cosine similarity between each task's raw gradient and a reference
     gradient (e.g. the summed 'plain' gradient or the CAGrad combined gradient),
@@ -152,6 +211,58 @@ def raw_grad_cosine_to_reference_plot(raw_grads, reference_grads, task_names, ti
     plt.ylim(-1.05, 1.05)
     plt.grid(True)
     plt.tight_layout()
+
+
+def raw_grad_cosine_to_references_plot(raw_grads, references, task_names, titles, window=50, show_raw=True):
+    """Two-or-more panel cosine-similarity plot with a centered moving average.
+
+    ``raw_grads`` is either a list of per-epoch dicts (training logger format)
+    or a dict mapping task name → ``(n_epochs, dim)`` array.
+    ``references`` is a sequence of per-epoch reference gradients (plain summed
+    direction, CAGrad combined gradient, …), one panel each.
+    """
+    n_panels = len(references)
+    rc = {
+        "font.size": 16,
+        "axes.titlesize": 18,
+        "axes.labelsize": 16,
+        "xtick.labelsize": 14,
+        "ytick.labelsize": 14,
+        "legend.fontsize": 13,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+    }
+    with plt.rc_context(rc):
+        fig, axes = plt.subplots(
+            n_panels, 1, figsize=(7.2, 8.0), sharex=True, squeeze=False, layout="constrained",
+        )
+        axes = axes[:, 0]
+        fig.get_layout_engine().set(h_pad=0.18, w_pad=0.04, hspace=0.10)
+        raw_is_dict = isinstance(raw_grads, dict)
+
+        for ax, reference_grads, title in zip(axes, references, titles):
+            for i, name in enumerate(task_names):
+                color, linestyle = _task_gradient_style(name, i)
+                task_grads = raw_grads[name] if raw_is_dict else [epoch_grads[name] for epoch_grads in raw_grads]
+                cosines = _cosine_rows(task_grads, reference_grads)
+                if show_raw:
+                    ax.plot(cosines, color=color, linestyle=linestyle, linewidth=0.8, alpha=0.22, zorder=2)
+                epochs, smoothed = moving_average(cosines, window)
+                ax.plot(epochs, smoothed, color=color, linestyle=linestyle, linewidth=2.4, label=_task_display_name(name), zorder=3)
+            ax.set_title(title, pad=8)
+            ax.set_ylabel("Cosine similarity")
+            ax.set_ylim(-1.05, 1.05)
+            ax.tick_params(axis="both", labelsize=14)
+            ax.grid(True, alpha=0.45)
+            ax.axhline(0.0, color="0.55", linewidth=0.8, zorder=1)
+
+        axes[-1].set_xlabel("Epoch")
+        handles, labels = axes[0].get_legend_handles_labels()
+        fig.legend(
+            handles, labels, loc="outside upper center", ncol=2, frameon=False,
+            handlelength=3.0, columnspacing=1.4, labelspacing=0.3,
+        )
+    return fig, axes
 
 
 def plot_loss_and_estimates(loss_dict, estimates, title, n_listeners=None, listener_labels=None):

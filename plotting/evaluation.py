@@ -8,18 +8,39 @@ from models.listener_based.llado2025.model import llado2025_grad_surgery
 from models.listener_based.desena2020.model import desena2020
 from models.listener_based.LSD.model import LSD
 from plotting.batch_utils import load_plot_config, mean_over_stimulus_batch
+from datasets.stimulus_dataset.dataset import _raised_cosine_ramp
 
 PLOT_STIM_LENGTH_MS = 100.0
 PLOT_N_STIM = 8
 PLOT_STIM_SEED = 42
+PLOT_RAMP_TIME_MS = 10.0
 
 
 def _broadband_white_noise_batch(fs, device, dtype):
     n_samples = int(round(PLOT_STIM_LENGTH_MS * fs / 1000.0))
+    ramp_samples = int(round(PLOT_RAMP_TIME_MS * fs / 1000.0))
     rng = np.random.default_rng(PLOT_STIM_SEED)
     stim = rng.standard_normal((PLOT_N_STIM, 1, n_samples), dtype=np.float32)
+    if ramp_samples > 0:
+        stim = stim * _raised_cosine_ramp(n_samples, ramp_samples).astype(np.float32)
     stim = stim / np.std(stim).clip(min=1e-8)
     return torch.as_tensor(stim, device=device, dtype=dtype)
+
+
+def average_llado_over_stimulus_draws(llado_model, prop, filters, stim, n_listeners):
+    """Mean Llado azimuth over stimulus draws in ``stim`` (N, 1, T), one draw at a time."""
+    filters_t = torch.as_tensor(filters, device=stim.device, dtype=stim.dtype)
+    if filters_t.ndim == 2:
+        filters_t = filters_t.unsqueeze(0)
+    per_draw = []
+    with torch.no_grad():
+        for i in range(int(stim.shape[0])):
+            s = stim[i : i + 1]
+            binaural = prop(s, filters_t)
+            binaural_flat = binaural.reshape(-1, 2, binaural.shape[-1])
+            loc = llado_model(binaural_flat, s)["output"].reshape(1, n_listeners)
+            per_draw.append(loc)
+    return torch.cat(per_draw, dim=0).mean(dim=0)
 
 
 def _final_spk_filters(saved_data):

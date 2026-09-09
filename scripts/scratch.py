@@ -65,6 +65,8 @@ lambda_loc = float(config["training"].get("lambda_loc", 0.5))
 lambda_loc = min(max(lambda_loc, 0.0), 1.0)
 model_weights = [2.0 * lambda_loc, 2.0 * (1.0 - lambda_loc)]
 filter_initialisation = {"init_weight": "middle", "fs": fs, "n_bands": 4, "band_mode": "log"}
+train_loc = lambda_loc > 0.0
+train_col = lambda_loc < 1.0
     
 sofaile = load_sofa(sofa_path)
 hrirs = get_template_for_llado2025_desena_2020(sofaile, device=device, dtype=dtype)
@@ -97,15 +99,25 @@ nn.set_filter_initialisation(**filter_initialisation)
 nn = nn.to(device=device, dtype=dtype)
 second_moment = SecondMoment(n_taps, n_sources, device=device, dtype=dtype)
 
+trained_models = []
+if train_loc:
+    trained_models.append(llado_model)
+if train_col:
+    trained_models.append(lsd_model)
+if lambda_loc <= 0.0:
+    model_weights = [2.0]
+elif lambda_loc >= 1.0:
+    model_weights = [2.0]
 modelTrainer = ModelTrainer(
-    [llado_model, lsd_model],
+    trained_models,
     weights=model_weights,
 )
 
-targets = {
-    "llado2025_grad_surgery": target_angles.unsqueeze(0),
-    "LSD": torch.zeros_like(target_angles.unsqueeze(0)),
-}
+targets = {}
+if train_loc:
+    targets["llado2025_grad_surgery"] = target_angles.unsqueeze(0)
+if train_col:
+    targets["LSD"] = torch.zeros_like(target_angles.unsqueeze(0))
 
 stim_loader, stim_dataset = get_stim_loader(
     fs=fs,
@@ -166,8 +178,8 @@ run_config = {
     ],
     "lambda_loc": lambda_loc,
     "targets": {
-        "llado2025_grad_surgery": "target_angles",
-        "LSD": 0.0,
+        name: ("target_angles" if name == "llado2025_grad_surgery" else 0.0)
+        for name in modelTrainer.model_dict
     },
     "training": {
         **config["training"],

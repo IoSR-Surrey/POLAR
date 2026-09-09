@@ -18,9 +18,15 @@ from plotting.spatial_plots import localisation_arrows_plot
 from utils.miscellaneous import target_angle_for_listeners
 from utils.sofa_functions import load_sofa
 
+plt.rcParams.update({
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+})
+
 RUNS = [
-    ROOT / "outputs/cagrad/2026-08-05_045408",
-    ROOT / "outputs/cagrad/2026-08-05_050357",
+    {"path": ROOT / "outputs/cagrad/2026-08-05_045408", "label": r"$S_{0.5}$"},
+    {"path": ROOT / "outputs/cagrad/2026-08-05_050357", "label": r"$S_{0.25}$"},
+    {"path": ROOT / "outputs/cagrad/2026-08-20_111650", "label": r"$S_{0}$"},
 ]
 
 
@@ -52,7 +58,7 @@ def load_saved_data(run_dir):
     }
 
 
-def replot_run(run_dir):
+def replot_run(run_dir, title=None):
     saved_data = load_saved_data(run_dir)
     old_loc = np.asarray(saved_data["localisation_angles"][0]).reshape(-1)
     old_lsd = np.asarray(saved_data["lsd"][0]).reshape(-1)
@@ -83,14 +89,17 @@ def replot_run(run_dir):
     )
     out = run_dir / "plots" / "localisation_arrows.png"
     fig = plt.gcf()
-    fig.savefig(out, bbox_inches="tight", dpi=150)
+    if title is not None:
+        fig.axes[0].set_title(f"Estimated localisation ({title})")
+    fig.savefig(out.with_suffix(".png"), bbox_inches="tight", dpi=300)
+    fig.savefig(out.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out}")
 
 
 def main():
-    for run_dir in RUNS:
-        replot_run(run_dir)
+    for spec in RUNS:
+        replot_run(spec["path"], spec["label"])
 
 
 if __name__ == "__main__":

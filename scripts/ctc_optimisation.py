@@ -44,9 +44,6 @@ from utils.miscellaneous import (
 from utils.seed import set_seed
 from utils.sofa_functions import get_IRs, get_template_for_llado2025_desena_2020, load_sofa, sofa_find
 
-# Long enough that circular inversion ≈ the plant's linear convolution (HRIR 256).
-LINEAR_CTC_N_FFT = 8192
-
 
 def compute_xtc_filters(H, reg=0.0):
     n_fft = H.shape[-1]
@@ -57,22 +54,200 @@ def compute_xtc_filters(H, reg=0.0):
     return G
 
 
-def compute_ctc_filters(sofaile, target_angle, left_spk_angle=30.0, right_spk_angle=-30.0, n_fft=None):
-    """Classical CTC filters that render ``target_angle`` at the ears.
-
-    ``n_fft`` is the invert size. The optimiser plant is linear convolution, so
-    ``n_fft`` must be much longer than the HRIRs or the inverse wraps. Default
-    8192 makes circular mix ≈ linear; ``n_fft`` equal to the HRIR length is the
-    old circular 256-point inverse.
-    """
+def compute_plant_matrix(sofaile, left_spk_angle=30.0, right_spk_angle=-30.0, n_fft=256):
+    """2x2 plant H(ω): rows = ears, columns = loudspeakers (±30° HRIRs)."""
     left_spk_hrirs = get_IRs(sofa_find(left_spk_angle, sofaile), sofaile).numpy()[0]
     right_spk_hrirs = get_IRs(sofa_find(right_spk_angle, sofaile), sofaile).numpy()[0]
-    ref_hrirs = get_IRs(sofa_find(target_angle, sofaile), sofaile).numpy()[0]
     if n_fft is None:
-        n_fft = LINEAR_CTC_N_FFT
-
+        n_fft = left_spk_hrirs.shape[-1]
     irs = np.stack([left_spk_hrirs, right_spk_hrirs], axis=1)  # (2 ears, 2 spk, T)
-    H = np.fft.fft(irs, n=n_fft, axis=-1)
+    return np.fft.fft(irs, n=n_fft, axis=-1)
+
+
+def analyse_plant_inverse_condition(H, fs, reg=0.0):
+    """Per-bin condition number of H^{-1} (and of H) on the positive-frequency DFT grid.
+
+    CTC inverts G[k] = (H[k] + reg I)^{-1}. For an invertible matrix,
+    κ(H^{-1}) = κ(H) = σ_max / σ_min. ``cond_inv`` is measured on the
+    realised inverse so numerical error at near-singular bins is visible.
+    """
+    n_fft = H.shape[-1]
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / fs)
+    n_r = freqs.shape[0]
+    eye = np.eye(2, dtype=np.complex128)
+    cond_H = np.empty(n_r)
+    cond_inv = np.empty(n_r)
+    sigma_max = np.empty(n_r)
+    sigma_min = np.empty(n_r)
+    inv_norm = np.empty(n_r)
+    det_abs = np.empty(n_r)
+    for k in range(n_r):
+        Hk = np.asarray(H[:, :, k], dtype=np.complex128) + reg * eye
+        s = np.linalg.svd(Hk, compute_uv=False)
+        sigma_max[k] = float(s[0])
+        sigma_min[k] = float(s[-1])
+        cond_H[k] = float(s[0] / max(s[-1], np.finfo(float).tiny))
+        Gk = np.linalg.inv(Hk)
+        cond_inv[k] = float(np.linalg.cond(Gk))
+        inv_norm[k] = float(np.linalg.norm(Gk, 2))
+        det_abs[k] = float(np.abs(np.linalg.det(Hk)))
+    return {
+        "freqs": freqs,
+        "cond_H": cond_H,
+        "cond_inv": cond_inv,
+        "sigma_max": sigma_max,
+        "sigma_min": sigma_min,
+        "inv_spectral_norm": inv_norm,
+        "det_abs": det_abs,
+        "n_fft": n_fft,
+        "fs": fs,
+        "reg": reg,
+    }
+
+
+def plant_condition_band_summary(stats, f_min=80.0, f_max=20000.0):
+    """Min / median / max of κ(H^{-1}) in a frequency band."""
+    freqs = stats["freqs"]
+    cond = stats["cond_inv"]
+    band = (freqs >= f_min) & (freqs <= f_max) & np.isfinite(cond)
+    cond_b = cond[band]
+    freqs_b = freqs[band]
+    i_min = int(np.argmin(cond_b))
+    i_max = int(np.argmax(cond_b))
+    return {
+        "f_min": f_min,
+        "f_max": f_max,
+        "n_bins": int(band.sum()),
+        "min": float(cond_b[i_min]),
+        "min_hz": float(freqs_b[i_min]),
+        "median": float(np.median(cond_b)),
+        "mean": float(np.mean(cond_b)),
+        "max": float(cond_b[i_max]),
+        "max_hz": float(freqs_b[i_max]),
+        "rel_cond_H_error": float(
+            np.nanmax(np.abs(stats["cond_inv"][band] - stats["cond_H"][band]) / np.maximum(stats["cond_H"][band], 1e-12))
+        ),
+    }
+
+
+def print_plant_condition_summary(stats, f_min=80.0, f_max=20000.0):
+    s = plant_condition_band_summary(stats, f_min=f_min, f_max=f_max)
+    print(
+        f"Plant inverse condition number (n_fft={stats['n_fft']}, "
+        f"reg={stats['reg']:g}, {f_min:g}–{f_max:g} Hz, {s['n_bins']} bins):"
+    )
+    print(f"  min    κ(H^{{-1}}) = {s['min']:.3g} at {s['min_hz']:.1f} Hz")
+    print(f"  median κ(H^{{-1}}) = {s['median']:.3g}")
+    print(f"  mean   κ(H^{{-1}}) = {s['mean']:.3g}")
+    print(f"  max    κ(H^{{-1}}) = {s['max']:.3g} at {s['max_hz']:.1f} Hz")
+    print(f"  max |κ(H^{{-1}})-κ(H)| / κ(H) = {s['rel_cond_H_error']:.2e}")
+
+
+def plot_ctc_plant_condition(stats, stats_dense=None, f_min=80.0, f_max=20000.0):
+    """κ(H^{-1}) and singular values of the 2x2 plant vs frequency."""
+    plt.rcParams.update({
+        "font.size": 14,
+        "axes.titlesize": 16,
+        "axes.labelsize": 14,
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 12,
+        "legend.fontsize": 12,
+    })
+    fig, (ax_cond, ax_svd) = plt.subplots(2, 1, figsize=(7.2, 6.6), sharex=True)
+
+    cond_color = "#0072B2"
+    smax_color = "#009E73"
+    smin_color = "#D55E00"
+
+    def _band(st):
+        m = (st["freqs"] >= f_min) & (st["freqs"] <= f_max)
+        return st["freqs"][m], st["cond_inv"][m], st["sigma_max"][m], st["sigma_min"][m], st["inv_spectral_norm"][m]
+
+    if stats_dense is not None:
+        f_d, cond_d, smax_d, smin_d, _ = _band(stats_dense)
+        ax_cond.semilogx(f_d, cond_d, color=cond_color, lw=2.2, label=r"$\kappa(H^{-1})$")
+        ax_svd.semilogx(f_d, smax_d, color=smax_color, lw=2.2, label=r"$\sigma_{\mathrm{max}}(H)$")
+        ax_svd.semilogx(f_d, smin_d, color=smin_color, lw=2.2, label=r"$\sigma_{\mathrm{min}}(H)$")
+        f_b, cond_b, _, _, _ = _band(stats)
+        ax_cond.semilogx(
+            f_b, cond_b, color="0.25", marker="o", ms=3.5, ls="none",
+            label=rf"CTC bins ($N={stats['n_fft']}$)", zorder=3,
+        )
+    else:
+        f_b, cond_b, smax_b, smin_b, _ = _band(stats)
+        ax_cond.semilogx(f_b, cond_b, color=cond_color, lw=2.2, label=r"$\kappa(H^{-1})$")
+        ax_svd.semilogx(f_b, smax_b, color=smax_color, lw=2.2, label=r"$\sigma_{\mathrm{max}}(H)$")
+        ax_svd.semilogx(f_b, smin_b, color=smin_color, lw=2.2, label=r"$\sigma_{\mathrm{min}}(H)$")
+
+    ax_cond.set_yscale("log")
+    ax_cond.set_ylabel(r"$\kappa(H^{-1})$")
+    ax_cond.set_title("Plant inverse conditioning")
+    ax_cond.set_xlim(f_min, f_max)
+    ax_cond.grid(True, which="both", alpha=0.35)
+    ax_cond.legend(loc="best", frameon=True)
+    ax_cond.tick_params(axis="both", labelsize=12)
+
+    ax_svd.set_yscale("log")
+    ax_svd.set_xlabel("Frequency [Hz]")
+    ax_svd.set_ylabel("Singular value")
+    ax_svd.set_xlim(f_min, f_max)
+    ax_svd.grid(True, which="both", alpha=0.35)
+    ax_svd.legend(loc="best", frameon=True)
+    ax_svd.tick_params(axis="both", labelsize=12)
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_ctc_plant_inverse_gain(stats, stats_dense=None, f_min=80.0, f_max=20000.0):
+    """||H^{-1}||_2 vs frequency, with the CTC DFT bins overlaid."""
+    plt.rcParams.update({
+        "font.size": 14,
+        "axes.titlesize": 16,
+        "axes.labelsize": 14,
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 12,
+        "legend.fontsize": 12,
+    })
+    fig, ax = plt.subplots(figsize=(7.2, 4.0))
+    gain_color = "#0072B2"
+
+    def _band(st):
+        m = (st["freqs"] >= f_min) & (st["freqs"] <= f_max)
+        return st["freqs"][m], st["inv_spectral_norm"][m]
+
+    if stats_dense is not None:
+        f_d, g_d = _band(stats_dense)
+        ax.semilogx(f_d, g_d, color=gain_color, lw=2.2, label=r"$\|H^{-1}\|_2$")
+        f_b, g_b = _band(stats)
+        ax.semilogx(
+            f_b, g_b, color="0.25", marker="o", ms=3.5, ls="none",
+            label=rf"CTC bins ($N={stats['n_fft']}$)", zorder=3,
+        )
+    else:
+        f_b, g_b = _band(stats)
+        ax.semilogx(f_b, g_b, color=gain_color, lw=2.2, label=r"$\|H^{-1}\|_2$")
+
+    ax.set_yscale("log")
+    ax.set_xlabel("Frequency [Hz]")
+    ax.set_ylabel(r"$\|H^{-1}\|_2$")
+    ax.set_title("Plant inverse gain")
+    ax.set_xlim(f_min, f_max)
+    ax.grid(True, which="both", alpha=0.35)
+    ax.legend(loc="best", frameon=True)
+    ax.tick_params(axis="both", labelsize=12)
+    fig.tight_layout()
+    return fig
+
+
+def compute_ctc_filters(sofaile, target_angle, left_spk_angle=30.0, right_spk_angle=-30.0, n_fft=256):
+    """Classical CTC filters that render ``target_angle`` at the ears.
+
+    256-point circular inverse, fftshifted for linear convolution in the plant.
+    """
+    ref_hrirs = get_IRs(sofa_find(target_angle, sofaile), sofaile).numpy()[0]
+    H = compute_plant_matrix(sofaile, left_spk_angle, right_spk_angle, n_fft)
+    n_fft = H.shape[-1]
     G = compute_xtc_filters(H)
     ref_hrtf = np.fft.fft(ref_hrirs, n=n_fft, axis=-1)
 
@@ -83,6 +258,45 @@ def compute_ctc_filters(sofaile, target_angle, left_spk_angle=30.0, right_spk_an
     right = np.real(np.fft.ifft(right_f)).reshape(1, -1)
     filts = np.concatenate((left, right), axis=0)
     return np.fft.fftshift(filts, axes=-1)
+
+
+class CircularMixingPropagation:
+    """256-point circular mix used to plot classical CTC: ears = ifft(H (S G))."""
+
+    def __init__(
+        self,
+        sofaile,
+        n_fft,
+        lstn_pos,
+        spk_pos,
+        apply_distance_attenuation=True,
+        left_spk_angle=30.0,
+        right_spk_angle=-30.0,
+        device="cpu",
+        dtype=torch.float32,
+    ):
+        self.n_fft = int(n_fft)
+        left_h = get_IRs(sofa_find(left_spk_angle, sofaile), sofaile, device=device, dtype=dtype)
+        right_h = get_IRs(sofa_find(right_spk_angle, sofaile), sofaile, device=device, dtype=dtype)
+        irs = torch.stack([left_h, right_h], dim=2)
+        self.H = torch.fft.fft(irs, n=self.n_fft, dim=-1)
+        dist = torch.linalg.vector_norm(spk_pos - lstn_pos, dim=-1).reshape(-1)
+        if apply_distance_attenuation:
+            self.src_gain = (1.0 / dist).to(device=device, dtype=dtype)
+        else:
+            self.src_gain = torch.ones(irs.shape[2], device=device, dtype=dtype)
+
+    def __call__(self, stim, spk_filters, listener_indices=None):
+        return self.forward(stim, spk_filters, listener_indices)
+
+    def forward(self, stim, spk_filters, listener_indices=None):
+        n_fft = self.n_fft
+        S = torch.fft.fft(stim, n=n_fft, dim=-1)
+        G = torch.fft.fft(spk_filters, n=n_fft, dim=-1)
+        SG = S * G * self.src_gain.view(1, -1, 1)
+        H = self.H if listener_indices is None else self.H[listener_indices]
+        ears_f = torch.einsum("lesk,bsk->blek", H, SG)
+        return torch.fft.ifft(ears_f, n=n_fft, dim=-1).real
 
 
 def smooth_third_octave(freq, mag_db):
@@ -141,8 +355,13 @@ def _table_wrapped_phase_error(
     return freqs, _wrap_phase(px - py)
 
 
-def _prepare_ctc_plot_signals(proposed, proposed_col_only, ctc, reference_bin, fs, prop, stim):
-    """Render impulse responses from the filters as saved (no extra gain or bandpass)."""
+def _prepare_ctc_plot_signals(
+    proposed, proposed_col_only, ctc, reference_bin, fs, prop, stim, ctc_prop=None,
+):
+    """Render impulse responses. Learnt filters use ``prop`` (linear full conv);
+    CTC uses ``ctc_prop`` (circular DFT mix) when given.
+    """
+    ctc_render = ctc_prop if ctc_prop is not None else prop
     with torch.no_grad():
         proposed_t = torch.as_tensor(proposed, device=stim.device, dtype=stim.dtype).unsqueeze(0)
         col_only_t = torch.as_tensor(proposed_col_only, device=stim.device, dtype=stim.dtype).unsqueeze(0)
@@ -150,7 +369,7 @@ def _prepare_ctc_plot_signals(proposed, proposed_col_only, ctc, reference_bin, f
 
         bin_proposed = prop(stim, proposed_t).detach().cpu().numpy()[0, 0]
         bin_col_only = prop(stim, col_only_t).detach().cpu().numpy()[0, 0]
-        bin_ctc = prop(stim, ctc_t).detach().cpu().numpy()[0, 0]
+        bin_ctc = ctc_render(stim, ctc_t).detach().cpu().numpy()[0, 0]
 
     ref = reference_bin.detach().cpu().numpy()
     if ref.ndim == 3:
@@ -410,12 +629,15 @@ def plot_ctc_time_domain(proposed, proposed_col_only, ctc, fs):
     return fig
 
 
-def plot_ctc_comparison(proposed, proposed_col_only, ctc, reference_bin, fs, prop, stim):
+def plot_ctc_comparison(proposed, proposed_col_only, ctc, reference_bin, fs, prop, stim, ctc_prop=None):
     """1/3-octave magnitude, wrapped filter phase vs CTC, and ear IPD."""
     fig_mag = plot_ctc_magnitude(
-        proposed, proposed_col_only, ctc, reference_bin, fs, prop, stim, smooth=True,
+        proposed, proposed_col_only, ctc, reference_bin, fs, prop, stim,
+        ctc_prop=ctc_prop, smooth=True,
     )
-    sigs = _prepare_ctc_plot_signals(proposed, proposed_col_only, ctc, reference_bin, fs, prop, stim)
+    sigs = _prepare_ctc_plot_signals(
+        proposed, proposed_col_only, ctc, reference_bin, fs, prop, stim, ctc_prop=ctc_prop,
+    )
 
     proposed_spec = np.fft.rfft(sigs["proposed"], n=sigs["n_filts"], axis=-1)
     ctc_spec = np.fft.rfft(sigs["ctc"], n=sigs["n_filts"], axis=-1)
@@ -470,30 +692,20 @@ def plot_ctc_magnitude(
     fs,
     prop,
     stim,
+    ctc_prop=None,
     smooth=False,
 ):
     """Magnitude comparison from the raw optimiser filters (unnormalized rfft)."""
-    with torch.no_grad():
-        proposed_t = torch.as_tensor(proposed, device=stim.device, dtype=stim.dtype).unsqueeze(0)
-        col_only_t = torch.as_tensor(proposed_col_only, device=stim.device, dtype=stim.dtype).unsqueeze(0)
-        ctc_t = torch.as_tensor(ctc, device=stim.device, dtype=stim.dtype).unsqueeze(0)
-        bin_proposed = prop(stim, proposed_t).detach().cpu().numpy()[0, 0]
-        bin_col_only = prop(stim, col_only_t).detach().cpu().numpy()[0, 0]
-        bin_ctc = prop(stim, ctc_t).detach().cpu().numpy()[0, 0]
-
-    ref = reference_bin.detach().cpu().numpy()
-    if ref.ndim == 3:
-        ref = ref[0]
-
-    n_ear = max(ref.shape[-1], bin_proposed.shape[-1], bin_col_only.shape[-1], bin_ctc.shape[-1])
-    ref = _pad_time(ref, n_ear)
-    bin_proposed = _pad_time(bin_proposed, n_ear)
-    bin_col_only = _pad_time(bin_col_only, n_ear)
-    bin_ctc = _pad_time(bin_ctc, n_ear)
-
-    n_filts = max(proposed.shape[-1], proposed_col_only.shape[-1], ctc.shape[-1])
-    freqs_filt = np.fft.rfftfreq(n_filts, d=1 / fs)
-    freqs_ref = np.fft.rfftfreq(n_ear, d=1 / fs)
+    sigs = _prepare_ctc_plot_signals(
+        proposed, proposed_col_only, ctc, reference_bin, fs, prop, stim, ctc_prop=ctc_prop,
+    )
+    n_filts = sigs["n_filts"]
+    n_ear = sigs["n_ear"]
+    freqs_filt = sigs["freqs_filt"]
+    freqs_ref = sigs["freqs_ref"]
+    proposed, proposed_col_only, ctc = sigs["proposed"], sigs["proposed_col_only"], sigs["ctc"]
+    bin_proposed, bin_col_only, bin_ctc = sigs["bin_proposed"], sigs["bin_col_only"], sigs["bin_ctc"]
+    ref = sigs["ref"]
 
     def _mag(x, n):
         return 20.0 * np.log10(np.abs(np.fft.rfft(x, n=n, axis=-1)) + 1e-12)
@@ -574,6 +786,9 @@ def plot_ctc_localisation(
     fs,
     device,
     dtype,
+    stim=None,
+    ctc_prop=None,
+    ctc_stim=None,
     gtfb_path="data/banks/gtfb_48k.npy",
 ):
     """Localisation arrows for proposed / col-only / CTC via the llado model."""
@@ -584,7 +799,11 @@ def plot_ctc_localisation(
     lsd_model = LSD(fs, sofaile, target_angles, device=device, dtype=dtype)
     n_listeners = len(lstn_pos)
 
-    stim = _broadband_white_noise_batch(fs, device, dtype)
+    if stim is None:
+        stim = _broadband_white_noise_batch(fs, device, dtype)
+    ctc_render = ctc_prop if ctc_prop is not None else prop
+    if ctc_stim is None:
+        ctc_stim = stim
 
     results = {
         "Proposed (Col. + IPD)": _evaluate_llado_localisation(
@@ -594,7 +813,7 @@ def plot_ctc_localisation(
             proposed_col_only, prop, stim, llado_model, desena_model, lsd_model, n_listeners
         ),
         "CTC": _evaluate_llado_localisation(
-            ctc, prop, stim, llado_model, desena_model, lsd_model, n_listeners
+            ctc, ctc_render, ctc_stim, llado_model, desena_model, lsd_model, n_listeners
         ),
     }
 
@@ -736,11 +955,7 @@ def parse_args():
         "--ctc-n-fft",
         type=int,
         default=None,
-        help=(
-            "FFT length for the classical CTC inverse. Default "
-            f"{LINEAR_CTC_N_FFT} (linear-convolution approximation). "
-            "Pass the same value as --n-taps for the old circular invert."
-        ),
+        help="FFT length for the CTC inverse and circular plot mix. Default: --n-taps.",
     )
     parser.add_argument("--seed", type=int, default=48)
     parser.add_argument("--col-weight", type=float, default=1.0)
@@ -833,7 +1048,7 @@ def main():
     else:
         print("Using impulse stimulus")
 
-    ctc_n_fft = LINEAR_CTC_N_FFT if args.ctc_n_fft is None else args.ctc_n_fft
+    ctc_n_fft = args.n_taps if args.ctc_n_fft is None else args.ctc_n_fft
 
     saving_manager = SavingManager(args.output_dir, timestamp=True)
     write_run_config(saving_manager.output_dir, {
@@ -915,10 +1130,16 @@ def main():
         est_filters_col_only /= np.max(np.abs(est_filters_col_only)) / 0.9
 
     ctc_filters = compute_ctc_filters(sofaile, args.target_angle, n_fft=ctc_n_fft)
-    print(
-        f"CTC inverse n_fft={ctc_n_fft} "
-        f"({'linear-convolution approximation' if ctc_n_fft > args.n_taps else 'circular, same length as n_taps'})"
+    print(f"CTC inverse n_fft={ctc_n_fft}; all methods plotted through linear full convolution")
+    plant_H = compute_plant_matrix(sofaile, n_fft=ctc_n_fft)
+    plant_stats = analyse_plant_inverse_condition(plant_H, fs)
+    plant_n_fft_dense = max(4096, ctc_n_fft)
+    plant_stats_dense = analyse_plant_inverse_condition(
+        compute_plant_matrix(sofaile, n_fft=plant_n_fft_dense), fs,
     )
+    print_plant_condition_summary(plant_stats)
+    if plant_n_fft_dense != ctc_n_fft:
+        print_plant_condition_summary(plant_stats_dense)
     # Classical CTC assumes no 1/r; when prop applies attenuation, boost filters by r
     # so CTC ear levels match the same plant. Safe because 1/r is frequency-independent.
     if apply_distance_attenuation:
@@ -971,12 +1192,35 @@ def main():
         device=device,
         dtype=dtype,
     )
+    fig_cond = plot_ctc_plant_condition(plant_stats, plant_stats_dense)
+    fig_gain = plot_ctc_plant_inverse_gain(plant_stats, plant_stats_dense)
 
     saving_manager.save("spk_filters", spk_filters)
     saving_manager.save("spk_filters_col_only", spk_filters_col_only_np)
     saving_manager.save("est_filters", est_filters)
     saving_manager.save("est_filters_col_only", est_filters_col_only)
     saving_manager.save("ctc_filters", ctc_filters)
+    saving_manager.save("plant_condition", {
+        "freqs": plant_stats["freqs"],
+        "cond_inv": plant_stats["cond_inv"],
+        "cond_H": plant_stats["cond_H"],
+        "sigma_max": plant_stats["sigma_max"],
+        "sigma_min": plant_stats["sigma_min"],
+        "inv_spectral_norm": plant_stats["inv_spectral_norm"],
+        "n_fft": plant_stats["n_fft"],
+        "fs": plant_stats["fs"],
+        "reg": plant_stats["reg"],
+        "dense": {
+            "freqs": plant_stats_dense["freqs"],
+            "cond_inv": plant_stats_dense["cond_inv"],
+            "cond_H": plant_stats_dense["cond_H"],
+            "sigma_max": plant_stats_dense["sigma_max"],
+            "sigma_min": plant_stats_dense["sigma_min"],
+            "inv_spectral_norm": plant_stats_dense["inv_spectral_norm"],
+            "n_fft": plant_stats_dense["n_fft"],
+        },
+        "summary_80_20k": plant_condition_band_summary(plant_stats_dense),
+    })
     saving_manager.save("binaural_signals", binaural_signals)
     saving_manager.save("final_lsd", trainer.estimates["LSD"])
     saving_manager.save("final_ipd", trainer.estimates["IPD"])
@@ -992,12 +1236,16 @@ def main():
             "localisation_proposed",
             "localisation_col_only",
             "localisation_ctc",
+            "ctc_plant_condition",
+            "ctc_plant_inverse_gain",
         ],
     )
     plt.close(fig_mag_raw)
     plt.close(fig_mag)
     plt.close(fig_phase)
     plt.close(fig_taps)
+    plt.close(fig_cond)
+    plt.close(fig_gain)
     for fig in loc_figs:
         plt.close(fig)
 

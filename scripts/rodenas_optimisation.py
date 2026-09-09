@@ -41,6 +41,7 @@ from plotting.XY_plots import (
     raw_grad_cosine_to_reference_plot,
 )
 from plotting.spatial_plots import localisation_arrows_plot
+from plotting.evaluation import average_llado_over_stimulus_draws
 from plotting.batch_utils import (
     average_estimates_dicts,
     average_interaural_cues_dicts,
@@ -426,9 +427,10 @@ def plot_pair_directivity_polar(
     y_ceiling = max_db + pad
     ax.set_ylim(y_floor, y_ceiling)
     idx_str = ", ".join(str(int(i)) for i in group_indices.tolist())
-    ax.set_title(f"Group directivity (sources {idx_str}), r={radius:.1f} m")
+    ax.set_title(f"Group directivity (sources {idx_str}), r={radius:.1f} m", fontsize=16)
     fig.subplots_adjust(right=0.72)
-    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=True, fontsize=8)
+    ax.tick_params(axis="both", labelsize=12)
+    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=True, fontsize=12)
     ax.grid(True)
 
     if show:
@@ -459,6 +461,7 @@ def plot_arrows_with_directivity(
     directivity_scale=1.0,
     directivity_floor_db=-20,
     directivity_label="Proposed Method",
+    directivity_color="#0072B2",
     overlay_curve=None,
     overlay_curves=None,
     overlay_labels=None,
@@ -488,6 +491,7 @@ def plot_arrows_with_directivity(
         raise ValueError("overlay_labels must contain one label per overlay curve.")
 
     fig, ax = plt.subplots(figsize=figsize)
+    ax.set_axisbelow(True)
 
     ax.scatter(spk_pos[:, 0], spk_pos[:, 1], c='black', marker='x', label='Loudspeakers')
     ax.scatter(lstn_pos[:, 0], lstn_pos[:, 1], c='blue', label='Virtual Listeners')
@@ -527,6 +531,33 @@ def plot_arrows_with_directivity(
     if use_lsd_colorbar:
         sm = cm.ScalarMappable(cmap=cmap, norm=norm)
         fig.colorbar(sm, ax=ax, label="LSD")
+
+    if show_listener_target_lines and target_pos_np is not None:
+        xlim_before = ax.get_xlim()
+        ylim_before = ax.get_ylim()
+        tx, ty = float(target_pos_np[0]), float(target_pos_np[1])
+        for x, y in zip(lstn_pos[:, 0], lstn_pos[:, 1]):
+            p_lstn = np.array([float(x), float(y)], dtype=float)
+            p_tgt = np.array([tx, ty], dtype=float)
+            d = p_tgt - p_lstn
+            dist = float(np.linalg.norm(d))
+            if dist < 1e-12:
+                continue
+            u = d / dist
+            extend = 0.2 * dist
+            p0 = p_lstn - extend * u
+            p1 = p_tgt + extend * u
+            ax.plot(
+                [p0[0], p1[0]],
+                [p0[1], p1[1]],
+                linestyle="--",
+                linewidth=0.8,
+                color="0.65",
+                alpha=0.6,
+                zorder=1,
+            )
+        ax.set_xlim(xlim_before)
+        ax.set_ylim(ylim_before)
 
     if len(overlay_curve_list) > 0:
         curve_ref_global = np.asarray(overlay_curve_list[0])
@@ -604,12 +635,6 @@ def plot_arrows_with_directivity(
 
         cx, cy = group_mid
 
-        x_dir = cx + r_sel*np.cos(theta_sel)
-        y_dir = cy + r_sel*np.sin(theta_sel)
-
-        ax.plot(x_dir, y_dir, color="tab:blue", linewidth=2,
-                label=directivity_label if i == 0 else None, zorder=50)
-
         line_extent = 0.0
         for db_ref in (-10.0, 0.0, 10.0):
             line_extent = max(
@@ -619,12 +644,14 @@ def plot_arrows_with_directivity(
         th_oblique_ray = theta_wedge1 if cy >= 0.0 else theta_wedge0
         n_arc = 72
         th_arc = np.linspace(theta_wedge0, theta_wedge1, n_arc)
-        theta_label = 0.5 * (theta_wedge0 + theta_wedge1)
-        cos_tl, sin_tl = np.cos(theta_label), np.sin(theta_label)
-        label_radial_nudge = 0.04 * line_extent
+        # Fixed perpendicular offset from the outer (horizontal) ray so labels
+        # sit above the upper cone / below the lower cone without meeting at y = 0.
+        label_offset_m = 0.08
+        label_sign = 1.0 if cy >= 0.0 else -1.0
+        label_va = "bottom" if cy >= 0.0 else "top"
 
-        ref_line_kw = dict(color="0.45", linewidth=0.9, linestyle="-", zorder=35, alpha=0.75)
-        ref_arc_kw = dict(color="0.45", linewidth=0.8, linestyle="--", zorder=34, alpha=0.75)
+        ref_line_kw = dict(color="0.45", linewidth=0.9, linestyle="-", zorder=2, alpha=0.75)
+        ref_arc_kw = dict(color="0.45", linewidth=0.8, linestyle="--", zorder=2, alpha=0.75)
 
         ax.plot(
             [cx, cx + line_extent * np.cos(np.pi)],
@@ -650,21 +677,29 @@ def plot_arrows_with_directivity(
                     db_lbl = f"{int(round(db_ref))} dB"
                 else:
                     db_lbl = "0 dB"
-                r_lbl = circle_r + label_radial_nudge
+                x_lbl = cx + circle_r * np.cos(np.pi)
+                y_lbl = cy + label_sign * label_offset_m
                 ax.text(
-                    cx + r_lbl * cos_tl,
-                    cy + r_lbl * sin_tl,
+                    x_lbl,
+                    y_lbl,
                     db_lbl,
                     ha="center",
-                    va="center",
-                    fontsize=8,
+                    va=label_va,
+                    fontsize=9,
                     color="0.35",
-                    zorder=36,
+                    zorder=52,
+                    clip_on=False,
+                    bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.92, "pad": 0.15},
                 )
+
+        x_dir = cx + r_sel*np.cos(theta_sel)
+        y_dir = cy + r_sel*np.sin(theta_sel)
+        ax.plot(x_dir, y_dir, color=directivity_color, linewidth=2,
+                label=directivity_label if i == 0 else None, zorder=50)
 
         mid_angle_deg = float(np.rad2deg(mid_rad) % 360.0)
 
-        overlay_colors = ["k", "tab:purple", "tab:brown", "tab:gray"]
+        overlay_colors = ["#E69F00", "#009E73", "#D55E00", "#CC79A7", "#000000"]
 
         for curve_idx, curve in enumerate(overlay_curve_list):
             curve = np.asarray(curve, dtype=float)
@@ -693,57 +728,52 @@ def plot_arrows_with_directivity(
                 linewidth=1.4,
                 color=oc,
                 label=overlay_labels[curve_idx] if (overlay_labels and i == 0) else None,
-                zorder=5,
+                zorder=51,
             )
-
-    if show_listener_target_lines and target_pos_np is not None:
-        xlim_before = ax.get_xlim()
-        ylim_before = ax.get_ylim()
-        tx, ty = float(target_pos_np[0]), float(target_pos_np[1])
-        for x, y in zip(lstn_pos[:, 0], lstn_pos[:, 1]):
-            p_lstn = np.array([float(x), float(y)], dtype=float)
-            p_tgt = np.array([tx, ty], dtype=float)
-            d = p_tgt - p_lstn
-            dist = float(np.linalg.norm(d))
-            if dist < 1e-12:
-                continue
-            u = d / dist
-            extend = 0.2 * dist
-            p0 = p_lstn - extend * u
-            p1 = p_tgt + extend * u
-            ax.plot(
-                [p0[0], p1[0]],
-                [p0[1], p1[1]],
-                linestyle="--",
-                linewidth=0.8,
-                color="0.65",
-                alpha=0.6,
-                zorder=1,
-            )
-        ax.set_xlim(xlim_before)
-        ax.set_ylim(ylim_before)
 
     ax.set_aspect('equal')
     ax.grid(True)
-    ax.tick_params(axis='both', labelsize=12)
+    ax.tick_params(axis='both', labelsize=10)
     ax.set_xlabel("X (m)", fontsize=12)
     ax.set_ylabel("Y (m)", fontsize=12)
 
+    xs = [lstn_pos[:, 0], spk_pos[:, 0]]
+    ys = [lstn_pos[:, 1], spk_pos[:, 1]]
+    if target_pos_np is not None:
+        xs.append(np.atleast_1d(target_pos_np[0]))
+        ys.append(np.atleast_1d(target_pos_np[1]))
+    xs = np.concatenate(xs)
+    ys = np.concatenate(ys)
+    ax.set_xlim(float(xs.min()) - 0.12, float(xs.max()) + 0.12)
+    ax.set_ylim(float(ys.min()) - 0.12, float(ys.max()) + 0.12)
+
     handles, labels = ax.get_legend_handles_labels()
     unique = dict(zip(labels, handles))
+    geom_order = ["Loudspeakers", "Virtual Listeners", "Target"]
+    curve_order = [lab for lab in unique if lab not in geom_order]
+    n_rows = max(len(geom_order), len(curve_order))
+    legend_order = []
+    for i in range(n_rows):
+        if i < len(geom_order) and geom_order[i] in unique:
+            legend_order.append(geom_order[i])
+        if i < len(curve_order):
+            legend_order.append(curve_order[i])
+    legend_order.extend(k for k in unique if k not in legend_order)
     if legend_ncol is None:
         legend_ncol = 1 if len(unique) <= 2 else 2
     ax.legend(
-        unique.values(),
-        unique.keys(),
+        [unique[k] for k in legend_order],
+        legend_order,
         loc="lower center",
         bbox_to_anchor=legend_bbox_to_anchor,
         ncol=legend_ncol,
         frameon=False,
         fontsize=9,
+        columnspacing=1.2,
+        handletextpad=0.5,
     )
 
-    fig.tight_layout(pad=0.35, rect=[0.02, 0.02, 0.98, 0.91])
+    fig.tight_layout(pad=0.4, rect=[0.02, 0.02, 0.98, 0.86])
 
     if show:
         plt.show()
@@ -1068,14 +1098,18 @@ def main(model_weights=None):
     lsd_np = lsd.squeeze(0).detach().cpu().numpy()
     lstn_pos_np = lstn_pos.detach().cpu().numpy()
     spk_pos_np = spk_pos.detach().cpu().numpy()
+    plot_stim = stim_dataset.stimulus.to(device=device, dtype=dtype)
+    loc_plot = average_llado_over_stimulus_draws(
+        llado_model, prop, spk_filters, plot_stim, n_listeners
+    ).detach().cpu().numpy()
 
     time_domain_filters_plot(est_filters, fs=fs)
     saving_manager.save_new_plots("time_domain_filters")
     frequency_domain_filters_plot(est_filters, fs=fs)
     saving_manager.save_new_plots("frequency_domain_filters")
     localisation_arrows_plot(
-        lstn_pos, spk_pos, loc_np,
-        np.zeros_like(loc_np), lsd_np,
+        lstn_pos, spk_pos, loc_plot,
+        np.zeros_like(loc_plot), lsd_np,
         target_angle=target_angles.detach().cpu().numpy(),
     )
     saving_manager.save_new_plots("localisation_arrows")
@@ -1135,24 +1169,26 @@ def main(model_weights=None):
     plot_pair_directivity_polar(
         est_filters=est_filters, spk_pos=spk_pos_np, fs=fs,
         group_indices=right_array_indices, radius=10.0,
-        freqs_eval_hz=[250, 500, 1000, 2000, 4000],
-        overlay_curves=[rodenas2003_fig12_opt, rodenas2003_fig12_1000Hz],
-        overlay_labels=["rodenas2003 (opt.)", "rodenas2003 (1 kHz)"],
+        freqs_eval_hz=[1000],
+        overlay_curves=[rodenas2003_fig12_1000Hz],
+        overlay_labels=["rodenas2003 (1 kHz)"],
+        overlay_avg_directivity=False,
         db_floor=-40, show=False,
     )
     saving_manager.save_new_plots("directivity_polar")
 
     plot_arrows_with_directivity(
         est_filters=est_filters, spk_pos=spk_pos, lstn_pos=lstn_pos,
-        loc=torch.as_tensor(loc_np), fs=fs,
+        loc=torch.as_tensor(loc_plot), fs=fs,
         group_idx=[left_array_indices, right_array_indices],
         target_pos=target_position, show_listener_target_lines=True, show=False,
         freqs_eval_hz=[250, 500, 1000, 2000, 4000],
-        directivity_observation_radius_m=10.0, directivity_mode="avg",
+        directivity_observation_radius_m=10.0, directivity_mode="freq",
+        directivity_freq_idx=2,
         directivity_scale=0.8, directivity_floor_db=-20,
         overlay_curves=[rodenas2003_fig12_opt, rodenas2003_fig12_1000Hz],
         overlay_labels=["rodenas2003 (optimum)", "rodenas2003 (1000 Hz)"],
-        legend_bbox_to_anchor=(0.28, 1.02), figsize=(5, 5),
+        figsize=(5, 5),
     )
     saving_manager.save_new_plots("arrows_and_directivity")
 
@@ -1165,25 +1201,22 @@ def main(model_weights=None):
         fs, lstn_pos, torch.as_tensor(spk_pos_centre, dtype=dtype, device=device), sofaile,
         apply_distance_attenuation=apply_distance_attenuation, device=device, dtype=dtype,
     )
-    with torch.no_grad():
-        h_centre = torch.as_tensor(est_filters_centre, dtype=dtype, device=device).unsqueeze(0)
-        bin_stim_centre = prop_centre(eval_stim, h_centre)
-        bin_stim_centre = bin_stim_centre.view(bin_stim_centre.shape[0] * bin_stim_centre.shape[1], 2, -1)
-        loc_centre = (
-            llado_model(bin_stim_centre, eval_stim)["output"]
-            .view(eval_stim.shape[0], n_listeners)
-            .mean(dim=0)
-        )
+    h_centre = torch.as_tensor(est_filters_centre, dtype=dtype, device=device).unsqueeze(0)
+    loc_centre = average_llado_over_stimulus_draws(
+        llado_model, prop_centre, h_centre, plot_stim, n_listeners
+    )
 
     plot_arrows_with_directivity(
         est_filters=est_filters_centre,
         spk_pos=torch.as_tensor(spk_pos_centre, dtype=dtype),
         lstn_pos=lstn_pos.detach().cpu(), loc=loc_centre.detach().cpu(), fs=fs,
-        group_idx=[(0,), (1,)], show=False,
+        group_idx=[(0,), (1,)],
+        target_pos=target_position, show_listener_target_lines=True, show=False,
         freqs_eval_hz=[250, 500, 1000, 2000, 4000],
         directivity_observation_radius_m=10.0, directivity_mode="avg",
         directivity_scale=0.8, directivity_floor_db=-20,
-        directivity_label="Omni source", legend_ncol=1, figsize=(5, 5),
+        directivity_label="Omni source", directivity_color="#CC79A7",
+        legend_ncol=1, figsize=(5, 5),
     )
     saving_manager.save_new_plots("arrows_and_directivity_centre")
 

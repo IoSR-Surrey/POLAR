@@ -9,6 +9,7 @@ from logger.saving import task_grad_pairwise_cosine_similarity_stats
 from plotting.XY_plots import (time_domain_filters_plot,
                      frequency_domain_filters_plot,
                      raw_grad_cosine_to_reference_plot,
+                     raw_grad_cosine_to_references_plot,
                      plot_loss_and_estimates,
                      loss_over_epochs_plot,
                      loss_grad_norms_over_epochs_plot,
@@ -193,6 +194,13 @@ def ALL_PLOTTING_FUNCTIONS(saving_manager, show_plots=False):
             "Task gradient vs CAGrad update direction",
         )
         saving_manager.save_new_plots("raw_vs_cagrad_cosine_similarity")
+        raw_grad_cosine_to_references_plot(
+            saving_manager.saved_data["raw_grads"],
+            [summed_raw_grad, saving_manager.saved_data["effective_grad"]],
+            task_names,
+            ["SGD (summed) direction", "CAGrad update direction"],
+        )
+        saving_manager.save_new_plots("raw_vs_plain_and_cagrad_cosine_similarity")
 
 
     if all(key in saving_manager.saved_data for key in ("lstn_pos", "spk_pos", "localisation_angles")):

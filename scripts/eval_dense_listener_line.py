@@ -42,16 +42,22 @@ plt.rcParams.update({
     "xtick.labelsize": 12,
     "ytick.labelsize": 12,
     "legend.fontsize": 12,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
 })
 
 RUNS = [
     {
         "path": ROOT / "outputs/cagrad/2026-08-05_045408",
-        "label": r"$\lambda_{\mathrm{loc}}=0.5$",
+        "label": r"$S_{0.5}$",
     },
     {
         "path": ROOT / "outputs/cagrad/2026-08-05_050357",
-        "label": r"$\lambda_{\mathrm{loc}}=0.25$",
+        "label": r"$S_{0.25}$",
+    },
+    {
+        "path": ROOT / "outputs/cagrad/2026-08-20_111650",
+        "label": r"$S_{0}$",
     },
 ]
 N_LISTENERS = 51
@@ -62,8 +68,8 @@ SEED = 42
 Y_START = 0.5
 Y_END = -0.5
 LISTENER_CHUNK = 17
-SERIES_COLORS = ("#0072B2", "#D55E00", "#009E73")
-SERIES_LINESTYLES = ("-", "-", "--")
+SERIES_COLORS = ("#E69F00", "#56B4E9", "#000000", "#009E73")
+SERIES_LINESTYLES = ("-", "-", "-", "--")
 
 
 def _json_value(path):
@@ -157,6 +163,8 @@ def evaluate_filters(
 
 
 def subsample_listeners(lstn_pos, results, n_listeners=N_ARROW_LISTENERS):
+    if hasattr(lstn_pos, "detach"):
+        lstn_pos = lstn_pos.detach().cpu().numpy()
     lstn_pos = np.asarray(lstn_pos).reshape(-1, 2)
     idx = np.unique(np.linspace(0, len(lstn_pos) - 1, n_listeners).round().astype(int))
     return lstn_pos[idx], {key: np.asarray(value)[idx] for key, value in results.items()}
@@ -164,6 +172,8 @@ def subsample_listeners(lstn_pos, results, n_listeners=N_ARROW_LISTENERS):
 
 def plot_dense_arrows(run, results, lstn_pos, out_path):
     lstn_pos, results = subsample_listeners(lstn_pos, results)
+    training_y = np.array([-0.5, 0.0, 0.5])
+    trained_mask = np.any(np.isclose(lstn_pos[:, 1:2], training_y[None, :]), axis=1)
     localisation_arrows_plot(
         lstn_pos,
         run["spk_pos"],
@@ -175,6 +185,7 @@ def plot_dense_arrows(run, results, lstn_pos, out_path):
         arrow_head_width=0.12,
         arrow_head_length=0.14,
         arrow_linewidth=2,
+        trained_listener_mask=trained_mask,
     )
     fig = plt.gcf()
     fig.axes[0].set_title(f"Estimated localisation ({run['label']})", fontsize=16)
@@ -182,7 +193,9 @@ def plot_dense_arrows(run, results, lstn_pos, out_path):
         ax.tick_params(labelsize=12)
         if hasattr(ax, "yaxis") and ax.get_ylabel() == "LSD [dB]":
             ax.tick_params(labelsize=12)
-    fig.savefig(out_path, bbox_inches="tight", dpi=150)
+    out_path = Path(out_path)
+    fig.savefig(out_path.with_suffix(".png"), bbox_inches="tight", dpi=300)
+    fig.savefig(out_path.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
 
 
@@ -223,7 +236,9 @@ def plot_comparison(runs_with_results, y, out_path, title="Dense virtual-listene
     axes[2].set_xlabel("Listener y position [m]")
     axes[0].set_title(title)
     fig.tight_layout()
-    fig.savefig(out_path, bbox_inches="tight", dpi=150)
+    out_path = Path(out_path)
+    fig.savefig(out_path.with_suffix(".png"), bbox_inches="tight", dpi=300)
+    fig.savefig(out_path.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
 
 
@@ -327,7 +342,7 @@ def main():
     plot_dense_arrows(vbap_run, vbap_results, lstn_pos, comparison_dir / "localisation_arrows_dense_vbap.png")
     runs_with_results.append((vbap_run, vbap_results))
 
-    comparison_path = ROOT / "outputs/cagrad/dense_listener_line_2026-08-05_045408_vs_050357.png"
+    comparison_path = ROOT / "outputs/cagrad/dense_listener_line_lam050_lam025_lam000.png"
     plot_comparison(
         runs_with_results, y, comparison_path,
         title="Dense virtual-listener line at $x=0$ (100 ms white noise)",
@@ -375,6 +390,37 @@ def replot_saved_dense_arrows():
     vbap_out = comparison_dir / "localisation_arrows_dense_vbap.png"
     plot_dense_arrows(vbap_run, vbap_results, vbap_lstn, vbap_out)
     print(f"Wrote {vbap_out} ({N_ARROW_LISTENERS} listeners)")
+
+    runs_with_results = []
+    y = None
+    for spec in RUNS:
+        run = load_run(spec["path"])
+        run["label"] = spec["label"]
+        npy = run["run_dir"] / "npy"
+        lstn_pos = np.load(npy / "dense_lstn_pos.npy")
+        if y is None:
+            y = np.asarray(lstn_pos).reshape(-1, 2)[:, 1]
+        results = {
+            "localisation_angles": np.load(npy / "dense_localisation_angles.npy"),
+            "localisation_uncertainty": np.load(npy / "dense_localisation_uncertainty.npy"),
+            "lsd": np.load(npy / "dense_lsd.npy"),
+            "target_angles": np.load(npy / "dense_target_angles.npy"),
+        }
+        runs_with_results.append((run, results))
+    runs_with_results.append((vbap_run, vbap_results))
+    comparison_path = comparison_dir / "dense_listener_line_lam050_lam025_lam000.png"
+    plot_comparison(
+        runs_with_results, y, comparison_path,
+        title="Dense virtual-listener line at $x=0$ (100 ms white noise)",
+    )
+    print(f"Wrote {comparison_path}")
+    for run, _ in runs_with_results:
+        if "run_dir" not in run:
+            continue
+        plot_comparison(
+            runs_with_results, y, run["run_dir"] / "plots" / "localisation_dense_vs_y.png",
+            title="Dense virtual-listener line at $x=0$ (100 ms white noise)",
+        )
 
 
 if __name__ == "__main__":

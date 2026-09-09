@@ -8,7 +8,7 @@ from plotting.batch_utils import mean_over_stimulus_batch
 LSD_LOWPASS_REFERENCE_DB = 14.31
 
 
-def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty, lsd, target_angle=None, target_pos=None, listener_labels=None, max_arrow_length=1.2, lsd_vmax=None, arrow_head_width=0.12, arrow_head_length=0.14, arrow_linewidth=2):
+def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty, lsd, target_angle=None, target_pos=None, listener_labels=None, max_arrow_length=1.2, lsd_vmax=None, arrow_head_width=0.12, arrow_head_length=0.14, arrow_linewidth=2, trained_listener_mask=None):
 
     lstn_pos = ready_for_plotting(lstn_pos)
     spk_pos = ready_for_plotting(spk_pos)
@@ -27,7 +27,21 @@ def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty
     uncertainty = np.atleast_1d(uncertainty)
 
     ax.scatter(spk_pos[:, 0], spk_pos[:, 1], c='black', marker='x', label='Speaker', zorder=3)
-    ax.scatter(lstn_pos[:, 0], lstn_pos[:, 1], c='blue', marker='o', label='Listener', zorder=3)
+    if trained_listener_mask is None:
+        ax.scatter(lstn_pos[:, 0], lstn_pos[:, 1], c='blue', marker='o', label='Listener', zorder=3)
+    else:
+        trained = np.asarray(trained_listener_mask, dtype=bool).reshape(-1)
+        other = ~trained
+        if np.any(other):
+            ax.scatter(
+                lstn_pos[other, 0], lstn_pos[other, 1],
+                c='#D55E00', marker='o', label='Unseen listener', zorder=3,
+            )
+        if np.any(trained):
+            ax.scatter(
+                lstn_pos[trained, 0], lstn_pos[trained, 1],
+                c='#0072B2', marker='o', label='Optimised listener', zorder=4,
+            )
 
     arrow_head_len = arrow_head_length
     arrow_width = arrow_linewidth
@@ -39,7 +53,8 @@ def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty
     has_lsd = not np.all(np.isinf(lsd))
 
     if has_lsd:
-        lsd_vmax = float(lsd_vmax if lsd_vmax is not None else max(LSD_LOWPASS_REFERENCE_DB, lsd.max(), 1e-3))
+        # Headroom above the 7 kHz LP marker so it does not sit on the top tick.
+        lsd_vmax = float(lsd_vmax if lsd_vmax is not None else max(16.0, lsd.max(), 1e-3))
         lsd_norm = colors.Normalize(vmin=0.0, vmax=lsd_vmax)
         lsd_cmap = colors.LinearSegmentedColormap.from_list(
             "green_red", [(0, 1, 0), (0.8, 0.4, 0), (0.8, 0, 0)]
@@ -116,11 +131,20 @@ def localisation_arrows_plot(lstn_pos, spk_pos, localisation_angles, uncertainty
     ax.grid(True, zorder=0)
     ax.legend()
     if has_lsd:
-        cbar = fig.colorbar(lsd_sm, ax=ax, label='LSD [dB]')
+        # Extra pad so the 7 kHz LP label can sit left of the bar, clear of the ticks.
+        cbar = fig.colorbar(lsd_sm, ax=ax, label='LSD [dB]', pad=0.14)
         if LSD_LOWPASS_REFERENCE_DB <= lsd_vmax:
             cbar.ax.axhline(LSD_LOWPASS_REFERENCE_DB, color='black', linewidth=0.8, linestyle='--')
-            cbar.ax.text(
-                1.15, LSD_LOWPASS_REFERENCE_DB, f'{LSD_LOWPASS_REFERENCE_DB:g} (7 kHz LP ref)',
-                va='center', ha='left', fontsize=8, transform=cbar.ax.get_yaxis_transform(), clip_on=False,
+            cbar.ax.annotate(
+                '7 kHz LP',
+                xy=(0.0, LSD_LOWPASS_REFERENCE_DB),
+                xycoords=('axes fraction', 'data'),
+                xytext=(-6, 0),
+                textcoords='offset points',
+                ha='right',
+                va='center',
+                fontsize=9,
+                annotation_clip=False,
+                clip_on=False,
             )
     fig.tight_layout()

@@ -148,17 +148,13 @@ def replot_run(run_dir, ctc_mod, device, dtype):
 
     proposed = _as_2d_filters(np.load(npy / "spk_filters.npy"))
     col_only = recover_col_only_raw(run_dir, cfg, ctc_mod, prop, lsd_model, device, dtype)
-    ctc_n_fft = cfg.get("ctc_n_fft") or cfg["args"].get("ctc_n_fft")
-    if ctc_n_fft is not None:
-        ctc_n_fft = int(ctc_n_fft)
-        ctc = ctc_mod.compute_ctc_filters(sofaile, target_angle, n_fft=ctc_n_fft)
-        if apply_distance_attenuation:
-            ctc = ctc * ctc_mod._ctc_distance_attenuation_gain(lstn_pos, spk_pos)
-        np.save(npy / "ctc_filters.npy", ctc)
-        print(f"  CTC inverse n_fft={ctc_n_fft}, taps={ctc.shape[-1]}")
-    else:
-        ctc = np.load(npy / "ctc_filters.npy")
-        print(f"  loaded saved CTC taps={ctc.shape[-1]}")
+    n_taps = int(cfg["args"]["n_taps"])
+    ctc_n_fft = int(cfg.get("ctc_n_fft") or cfg["args"].get("ctc_n_fft") or n_taps)
+    ctc = ctc_mod.compute_ctc_filters(sofaile, target_angle, n_fft=ctc_n_fft)
+    if apply_distance_attenuation:
+        ctc = ctc * ctc_mod._ctc_distance_attenuation_gain(lstn_pos, spk_pos)
+    np.save(npy / "ctc_filters.npy", ctc)
+    print(f"  CTC inverse n_fft={ctc_n_fft}, taps={ctc.shape[-1]}")
 
     plot_dir = run_dir / "plots"
     plot_dir.mkdir(exist_ok=True)
