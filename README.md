@@ -1,6 +1,6 @@
 # Sweet_Gradient
 
-![Tests](https://github.com/asouchaud/Sweet_Gradient/actions/workflows/tests.yml/badge.svg?branch=main)
+![Tests](https://github.com/IoSR-Surrey/POLAR/actions/workflows/tests.yml/badge.svg?branch=angleParametrisation)
 
 Sweet Gradient provides a framework for optimisation of multichannel using perceptual loss functions, such as models for localisation, uncertainty, and colouration.
 
@@ -15,7 +15,7 @@ source env/bin/activate
 pip install -r requirements.txt
 ```
 
-## Run 
+## Run
 The next step is to run tests to check everything is running smoothly and then start running a simulation (see contents of main.py for more information):
 
 ```bash
