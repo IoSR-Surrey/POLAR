@@ -10,19 +10,17 @@ import json
 
 import torch
 
-from utils.seed import set_seed
-from utils.sofa_functions import load_sofa, get_template_for_llado2025_desena_2020
-from utils.miscellaneous import load_npy_to_torch
-
 from filter_estimation.model import MultiSourceFIR
-from propagation.model import BinauralFreeFieldPropagation
+from logger.printing import print_loss_and_estimates
 from models.listener_based.llado2025.model import llado2025_grad_surgery
 from models.train import ModelTrainer
-from logger.printing import print_loss_and_estimates
-
+from propagation.model import BinauralFreeFieldPropagation
+from utils.miscellaneous import load_npy_to_torch
+from utils.seed import set_seed
+from utils.sofa_functions import get_template_for_llado2025_desena_2020, load_sofa
 
 # Get the hyperparameters
-with open("config/hyperpameters.json", "r") as f:
+with open("config/hyperpameters.json", "r", encoding="utf-8") as f:
     hyperpameters = json.load(f)
 
 env_config = hyperpameters["env"]
@@ -68,6 +66,7 @@ filter_estimator = MultiSourceFIR(
 )
 if filter_config["init_weight"] is None:
     filter_estimator.set_filter_initialisation("middle")
+filter_estimator = filter_estimator.to(device=device, dtype=dtype)
 
 
 # Create propagator
@@ -120,7 +119,12 @@ with torch.no_grad():
     binaural_signals = propagator(stim, spk_filters)
     model_trainer.compute_estimates(binaural_signals, spk_filters, stim)
 
-final_estimate = model_trainer.estimates["llado2025_grad_surgery"].item()
+final_estimates = model_trainer.estimates["llado2025_grad_surgery"].squeeze(0)
 print("--------------------------------")
 print(f"Target azimuth: {target_angle:.2f} deg")
-print(f"Final estimated azimuth: {final_estimate:.2f} deg")
+for listener_idx, estimate in enumerate(final_estimates):
+    position = listeners[listener_idx].tolist()
+    print(
+        f"Listener {listener_idx} at ({position[0]:.2f}, {position[1]:.2f}) m: "
+        f"{estimate.item():.2f} deg"
+    )

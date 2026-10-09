@@ -6,11 +6,11 @@ Sweet Gradient provides a framework for optimisation of multichannel using perce
 
 ## Installation
 
-Make sure you have Python@3.12 installed (on Mac, run `brew install Python@3.12`).
+Make sure you have Python@3.13 installed (on Mac, run `brew install Python@3.13`).
 Then create a virtual environment and install requirements:
 
 ```bash
-python3.12 -m venv env
+python3.13 -m venv env
 source env/bin/activate
 pip install -r requirements.txt
 ```

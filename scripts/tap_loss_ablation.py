@@ -169,6 +169,7 @@ def run_condition(condition, study_root, config, shared, seed, num_epochs, run_p
 
     filter_estimator = MultiSourceFIR(n_taps, n_sources)
     filter_estimator.set_filter_initialisation(**FILTER_INITIALISATION)
+    filter_estimator = filter_estimator.to(device=device, dtype=dtype)
 
     stim_loader, _ = get_stim_loader(
         fs=fs,
