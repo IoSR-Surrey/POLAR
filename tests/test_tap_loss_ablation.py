@@ -22,7 +22,8 @@ from scripts.tap_loss_ablation import (
 
 # Tiny overrides so the full pipeline runs in seconds while exercising every step.
 FAST_OVERRIDES = {
-    "stimulus_dataset": {"n_bands": 2, "n_samples_per_band": 1},
+    # band_mode must not stay as linear_erb: that mode needs n_bands>=12 with erb_factor=0.25.
+    "stimulus_dataset": {"n_bands": 2, "n_samples_per_band": 1, "band_mode": "erb"},
     "training": {"batch_size": 2, "shuffle": True, "num_workers": 0, "drop_last": False},
 }
 
